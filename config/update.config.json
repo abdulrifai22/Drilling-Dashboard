@@ -1,0 +1,8 @@
+{
+  "_comment": "Sumber auto-update aplikasi. Diedit di sini TIDAK perlu rebuild aplikasi — cukup ganti file ini (di project saat development, atau di folder resources/config setelah installed) lalu restart aplikasi.",
+  "provider": "github",
+  "owner": "abdulrifai22",
+  "repo": "Drilling-Dashboard",
+  "checkOnStartup": true,
+  "checkDelaySeconds": 3
+}
