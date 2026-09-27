@@ -1344,10 +1344,19 @@ button:focus-visible, select:focus-visible, input:focus-visible, a:focus-visible
             <button class="btn small secondary" id="exportMapBtn">🖼️ Export Peta (JPG)</button>
           </div>
         </div>
+        <div class="upload-bar" style="margin-bottom:10px;">
+          <div class="grp">
+            <label class="btn" for="rigPosFileInput">📍 Upload File Rig Position (.xlsx)</label>
+            <input type="file" id="rigPosFileInput" accept=".xlsx,.xls,.csv">
+          </div>
+          <div class="grp"><span class="upload-bar status" id="rigPosStatusText">Belum ada file Rig Position diupload — peta hanya menampilkan titik Hole.</span></div>
+          <div class="grp"><button class="btn small secondary" id="rigPosClearBtn" style="display:none;">✕ Hapus Rig Position</button></div>
+        </div>
         <div class="legend" style="margin-bottom:10px;">
           <span><span class="dot" style="background:#1fd67a"></span>Hole Plan</span>
           <span><span class="dot" style="background:#4361ee"></span>Hole Finished</span>
           <span><span class="dot" style="background:#f5d020"></span>Hole Cancel</span>
+          <span id="rigPosLegendItem" style="display:none;"><span class="dot" style="background:#ff2d78"></span>Rig Position</span>
         </div>
         <div id="ht-map" style="height:520px;border-radius:10px;overflow:hidden;background:#171240;"></div>
         <div class="field-note" style="margin-top:8px;" id="ht-map-note">Peta KRS adalah peta georeferensi buatan sendiri (UTM Zone 52N / EPSG:32652) yang sudah tertanam di file ini — jalan tanpa internet. Pilihan basemap online butuh koneksi internet.</div>
@@ -3651,6 +3660,7 @@ function renderOverviewHoleTrackingSummary(){
 let holeDetailData = null; // {finished, plan, cancel, redrill} or null
 let htDrilldownCategory = null; // 'plan' | 'finish' | 'cancel' | null
 let htReconcileRigFilter = null; // Rig ID selected in the Hole Finish per-Rig reconciliation table, or null for all
+let rigPositionData = null; // {points:[{rigId,x,y,note,date,remark,subpit}], sourceLabel} or null = not uploaded yet
 let holeMapInstance = null;
 let holeMapLayers = [];
 let holeMapCanvasRenderer = null;
@@ -3772,6 +3782,101 @@ function parseHoleDetailWorkbook(workbook){
   }).filter(r=>r.holeId);
 
   return {finished, plan, cancel, redrill, sheets:{finishedSheet, planSheet, cancelSheet, redrillSheet}};
+}
+
+/* =====================================================================
+   RIG POSITION — shows each rig's current point on the Hole map.
+   Two source formats, auto-detected (same "prefer a clean snapshot, fall
+   back to a per-row dated log" pattern as Hole Tracking above):
+     - A sheet named "POSITION": one row per rig, columns are positional
+       ([RigLabel, Code?, X, Y]) since the header row is often merged/blank
+       except for literal "X"/"Y" labels.
+     - Any other sheet shaped like a per-rig movement log — columns "Rig
+       ID"/"X"/"Y" (+ optional "Date"/"Remark"/"Sub_Pit") — one contractor's
+       dated history, e.g. several rows per rig as it moves between holes.
+       Rows with no coordinate (a "Moving block" entry, say) are skipped
+       rather than overwriting the rig's last known good position, and only
+       the latest dated row per Rig ID is kept.
+===================================================================== */
+function parseRigPositionSnapshotSheet(workbook, sheetName){
+  const raw = safeSheetToJson(workbook, sheetName, {header:1, defval:null, raw:true});
+  if(!raw.length) return [];
+  const header = (raw[0]||[]).map(h=> h==null ? '' : String(h).trim().toLowerCase());
+  let xCol = header.findIndex(h=>h==='x');
+  let yCol = header.findIndex(h=>h==='y');
+  if(xCol===-1 || yCol===-1){ xCol = 2; yCol = 3; } // fall back to the known real-world layout
+  const noteCol = xCol>1 ? 1 : null;
+  const out = [];
+  for(let i=1;i<raw.length;i++){
+    const row = raw[i];
+    if(!row) continue;
+    const rigRaw = row[0];
+    const x = parseNumLoose(row[xCol]);
+    const y = parseNumLoose(row[yCol]);
+    if(!rigRaw || x==null || y==null) continue;
+    out.push({
+      rigId: String(rigRaw).trim(),
+      note: noteCol!=null && row[noteCol]!=null ? String(row[noteCol]).trim() : null,
+      x, y, date:null, remark:null, subpit:null
+    });
+  }
+  return out;
+}
+
+function looksLikeRigPositionLogSheet(rows){
+  if(!rows || !rows.length) return false;
+  const keys = Object.keys(rows[0]);
+  const hasRig = keys.some(k=>/^rig[\s_-]?id$/i.test(k.trim()));
+  const hasX = keys.some(k=>/^x$/i.test(k.trim()));
+  const hasY = keys.some(k=>/^y$/i.test(k.trim()));
+  return hasRig && hasX && hasY;
+}
+
+function parseRigPositionLogSheet(workbook, sheetName){
+  const rows = safeSheetToJson(workbook, sheetName, {defval:null, raw:true});
+  if(!looksLikeRigPositionLogSheet(rows)) return [];
+  const parsed = rows.map(r=>{
+    const nm = buildNormKeyMap(r);
+    const rigId = getField(r, nm, 'Rig ID','RigID','Rig');
+    if(!rigId) return null;
+    return {
+      rigId: String(rigId).trim(),
+      x: parseNumLoose(getField(r, nm, 'X')),
+      y: parseNumLoose(getField(r, nm, 'Y')),
+      date: toDateOnly(getField(r, nm, 'Date')),
+      remark: getField(r, nm, 'Remark','Remarks'),
+      subpit: getField(r, nm, 'Sub_Pit','Sub-pit','Subpit'),
+      note: null
+    };
+  }).filter(Boolean);
+
+  const latestByRig = {};
+  parsed.forEach(r=>{
+    if(r.x==null || r.y==null) return; // e.g. a "Moving block" row with no fixed point yet
+    const key = r.rigId.toLowerCase();
+    if(!latestByRig[key] || (r.date && (!latestByRig[key].date || r.date > latestByRig[key].date))) latestByRig[key] = r;
+  });
+  return Object.values(latestByRig);
+}
+
+function parseRigPositionWorkbook(workbook){
+  const snapSheet = workbook.SheetNames.find(n=>/^position$/i.test(n.trim()))
+    || workbook.SheetNames.find(n=>/position/i.test(n));
+  if(snapSheet){
+    const points = parseRigPositionSnapshotSheet(workbook, snapSheet);
+    return {points, sourceLabel: `sheet "${snapSheet}"`};
+  }
+  const usedSheets = [];
+  const points = [];
+  workbook.SheetNames.forEach(name=>{
+    if(/drillplan|hole|list/i.test(name)) return; // steer clear of unrelated hole-plan sheets
+    const rows = safeSheetToJson(workbook, name, {defval:null, raw:true});
+    if(looksLikeRigPositionLogSheet(rows)){
+      points.push(...parseRigPositionLogSheet(workbook, name));
+      usedSheets.push(name);
+    }
+  });
+  return {points, sourceLabel: usedSheets.length ? `sheet ${usedSheets.map(s=>'"'+s+'"').join(', ')} (posisi terakhir per Rig)` : ''};
 }
 
 // Finds Hole IDs that were marked Cancel but ALSO appear in the Finished list — a
@@ -4260,6 +4365,23 @@ function renderHoleMap(){
     addPoints(holeDetailData.finished, '#4361ee', 'Finished'); // blue
     addPoints(holeDetailData.cancel, '#f5d020', 'Cancel'); // yellow
 
+    const rigLegendEl = document.getElementById('rigPosLegendItem');
+    if(rigPositionData && rigPositionData.points.length){
+      if(rigLegendEl) rigLegendEl.style.display = 'inline-flex';
+      rigPositionData.points.forEach(r=>{
+        if(r.x==null || r.y==null) return;
+        const {lat, lon} = utmToLatLon(r.x, r.y, 52);
+        if(isNaN(lat)||isNaN(lon)) return;
+        const marker = L.circleMarker([lat,lon], {radius:8, color:'#ffffff', weight:2, fillColor:'#ff2d78', fillOpacity:0.95})
+          .bindPopup(`<b>🚜 Rig ${r.rigId}</b>${r.note?`<br>${r.note}`:''}${r.subpit?`<br>Sub-pit: ${r.subpit}`:''}${r.remark?`<br>Status: ${r.remark}`:''}${r.date?`<br>Update: ${fmtDate(r.date)}`:''}`);
+        marker.addTo(holeMapInstance);
+        holeMapLayers.push(marker);
+        bounds.push([lat,lon]);
+      });
+    } else if(rigLegendEl){
+      rigLegendEl.style.display = 'none';
+    }
+
     if(bounds.length) holeMapInstance.fitBounds(bounds, {padding:[24,24]});
     else if(holeMapKrsLayer) holeMapInstance.fitBounds(KRS_MAP_BOUNDS, {padding:[12,12]});
   }
@@ -4278,6 +4400,47 @@ document.getElementById('ht-basemapMode').addEventListener('change', e=>{
 document.getElementById('ht-krsOpacity').addEventListener('input', e=>{
   htKrsOpacity = Number(e.target.value)/100;
   if(holeMapKrsLayer) holeMapKrsLayer.setOpacity(htKrsOpacity);
+});
+
+document.getElementById('rigPosFileInput').addEventListener('change', e=>{
+  const file = e.target.files[0];
+  if(!file) return;
+  const statusEl = document.getElementById('rigPosStatusText');
+  statusEl.textContent = uploadStartMessage(file);
+  statusEl.className = 'upload-bar status';
+  const reader = new FileReader();
+  reader.onload = async evt=>{
+    try{
+      const workbook = await readWorkbookOffThread(evt.target.result);
+      const parsed = parseRigPositionWorkbook(workbook);
+      if(!parsed.points.length){
+        statusEl.textContent = `❌ Tidak ditemukan data Rig Position yang valid. Pastikan ada sheet "POSITION" (kolom Rig, X, Y) atau sheet per-kontraktor dengan kolom Rig ID, X, Y.`;
+        statusEl.className = 'upload-bar status err';
+        return;
+      }
+      rigPositionData = parsed;
+      statusEl.textContent = `✅ "${file.name}" dimuat — ${parsed.points.length} rig (${parsed.sourceLabel}).`;
+      statusEl.className = 'upload-bar status ok';
+      document.getElementById('rigPosClearBtn').style.display = 'inline-block';
+      if(activeTab==='holetrack') renderHoleMap();
+      logUpload('Rig Position', file.name, parsed.points.length);
+    }catch(err){
+      console.error(err);
+      statusEl.textContent = '❌ Gagal membaca file: '+err.message;
+      statusEl.className = 'upload-bar status err';
+    }
+  };
+  reader.onerror = ()=>{ statusEl.textContent='❌ Gagal membaca file.'; statusEl.className='upload-bar status err'; };
+  reader.readAsArrayBuffer(file);
+});
+document.getElementById('rigPosClearBtn').addEventListener('click', ()=>{
+  rigPositionData = null;
+  document.getElementById('rigPosClearBtn').style.display = 'none';
+  const statusEl = document.getElementById('rigPosStatusText');
+  statusEl.textContent = 'Belum ada file Rig Position diupload — peta hanya menampilkan titik Hole.';
+  statusEl.className = 'upload-bar status';
+  document.getElementById('rigPosFileInput').value = '';
+  if(activeTab==='holetrack') renderHoleMap();
 });
 
 /* =====================================================================
@@ -4408,6 +4571,7 @@ async function buildHoleMapExportCanvas(scale, opts){
     ['#4361ee', `Hole Finished (${n(holeDetailData.finished)})`],
     ['#f5d020', `Hole Cancel (${n(holeDetailData.cancel)})`]
   ] : [['#1fd67a','Hole Plan'],['#4361ee','Hole Finished'],['#f5d020','Hole Cancel']];
+  if(rigPositionData && rigPositionData.points.length) legend.push(['#ff2d78', `Rig Position (${rigPositionData.points.length})`]);
   ctx.font = '12px system-ui, Segoe UI, sans-serif';
   const lw = Math.max(...legend.map(g=>ctx.measureText(g[1]).width)) + 40;
   const ly = size.y - (legend.length*19 + 16);

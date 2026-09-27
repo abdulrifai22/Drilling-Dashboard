@@ -3,6 +3,9 @@
 Semua perubahan penting pada aplikasi ini dicatat di file ini.
 Format versi mengikuti [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`.
 
+## Version 1.2.0
+- Tambahan: upload file Rig Position (.xlsx) di tab Hole Track — posisi tiap Rig sekarang tampil sebagai titik di Peta Persebaran Hole, lengkap dengan sub-pit/status/tanggal update kalau tersedia di file sumbernya.
+
 ## Version 1.1.4
 - Perbaikan: banner "Update tersedia" tertutup sebagian oleh title bar custom aplikasi (cuma kelihatan sedikit di bagian bawahnya) — sekarang tampil penuh di bawah title bar.
 
