@@ -3,7 +3,9 @@
 
 #dds-update-banner {
   position: fixed;
-  top: 0;
+  top: 34px; /* below the custom titlebar (#dds-titlebar, 34px tall) — otherwise the
+                titlebar's higher z-index paints over most of the banner, leaving only
+                a sliver of it visible below the titlebar's own bottom edge */
   left: 0;
   right: 0;
   z-index: 99999;
