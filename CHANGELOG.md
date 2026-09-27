@@ -3,6 +3,9 @@
 Semua perubahan penting pada aplikasi ini dicatat di file ini.
 Format versi mengikuti [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`.
 
+## Version 1.2.1
+- Perbaikan: Rig Position sekarang menggabungkan sheet snapshot ("POSITION") dengan sheet log bertanggal per-kontraktor (mis. "GGM") — data bertanggal yang usianya maksimal 7 hari dari tanggal terbaru akan menggantikan posisi di snapshot untuk Rig yang sama; Rig dengan data lebih dari 7 hari otomatis disembunyikan dari peta dan dilaporkan di pesan status.
+
 ## Version 1.2.0
 - Tambahan: upload file Rig Position (.xlsx) di tab Hole Track — posisi tiap Rig sekarang tampil sebagai titik di Peta Persebaran Hole, lengkap dengan sub-pit/status/tanggal update kalau tersedia di file sumbernya.
 

@@ -3832,9 +3832,20 @@ function looksLikeRigPositionLogSheet(rows){
   return hasRig && hasX && hasY;
 }
 
+// A dated log sheet is only useful for verifying HOW CURRENT a position is if we
+// actually reject stale rows — a rig whose last logged move was a month ago isn't
+// "at" that point anymore, it's just the last time anyone recorded it. Only rows
+// within this many days of the sheet's own latest date are trusted as current.
+const RIG_POSITION_MAX_AGE_DAYS = 7;
+
+// Parses one dated per-rig movement log (e.g. a per-contractor sheet like "GGM"):
+// takes each rig's latest dated row that actually has coordinates (skipping rows
+// like a "Moving block" remark with no fixed point yet), then rejects any rig whose
+// latest entry is older than RIG_POSITION_MAX_AGE_DAYS relative to the sheet's own
+// most recent date — reported back as staleRigs rather than silently dropped.
 function parseRigPositionLogSheet(workbook, sheetName){
   const rows = safeSheetToJson(workbook, sheetName, {defval:null, raw:true});
-  if(!looksLikeRigPositionLogSheet(rows)) return [];
+  if(!looksLikeRigPositionLogSheet(rows)) return null;
   const parsed = rows.map(r=>{
     const nm = buildNormKeyMap(r);
     const rigId = getField(r, nm, 'Rig ID','RigID','Rig');
@@ -3848,35 +3859,69 @@ function parseRigPositionLogSheet(workbook, sheetName){
       subpit: getField(r, nm, 'Sub_Pit','Sub-pit','Subpit'),
       note: null
     };
-  }).filter(Boolean);
+  }).filter(r=>r && r.x!=null && r.y!=null && r.date);
+  if(!parsed.length) return {points:[], staleRigs:[], maxDate:null, sheetName};
 
   const latestByRig = {};
   parsed.forEach(r=>{
-    if(r.x==null || r.y==null) return; // e.g. a "Moving block" row with no fixed point yet
     const key = r.rigId.toLowerCase();
-    if(!latestByRig[key] || (r.date && (!latestByRig[key].date || r.date > latestByRig[key].date))) latestByRig[key] = r;
+    if(!latestByRig[key] || r.date > latestByRig[key].date) latestByRig[key] = r;
   });
-  return Object.values(latestByRig);
+
+  const maxDate = parsed.reduce((m,r)=> r.date>m?r.date:m, parsed[0].date);
+  const cutoff = new Date(maxDate); cutoff.setDate(cutoff.getDate() - RIG_POSITION_MAX_AGE_DAYS);
+
+  const points = [], staleRigs = [];
+  Object.values(latestByRig).forEach(r=>{
+    if(r.date < cutoff) staleRigs.push(r.rigId);
+    else points.push(r);
+  });
+  return {points, staleRigs, maxDate, sheetName};
+}
+
+// A rig's numeric identity is what's stable across sheets that label it differently
+// ("RIG 30" in a manual POSITION snapshot vs "GGM-30" in a contractor's dated log) —
+// used to let fresh, dated data override the dateless snapshot for the same rig.
+function normalizeRigNumber(rigId){
+  const m = String(rigId).match(/(\d+)/);
+  return m ? m[1].replace(/^0+(?=\d)/,'') : String(rigId).trim().toLowerCase();
 }
 
 function parseRigPositionWorkbook(workbook){
   const snapSheet = workbook.SheetNames.find(n=>/^position$/i.test(n.trim()))
     || workbook.SheetNames.find(n=>/position/i.test(n));
-  if(snapSheet){
-    const points = parseRigPositionSnapshotSheet(workbook, snapSheet);
-    return {points, sourceLabel: `sheet "${snapSheet}"`};
-  }
-  const usedSheets = [];
-  const points = [];
+  const snapshotPoints = snapSheet ? parseRigPositionSnapshotSheet(workbook, snapSheet) : [];
+
+  const logResults = [];
   workbook.SheetNames.forEach(name=>{
-    if(/drillplan|hole|list/i.test(name)) return; // steer clear of unrelated hole-plan sheets
-    const rows = safeSheetToJson(workbook, name, {defval:null, raw:true});
-    if(looksLikeRigPositionLogSheet(rows)){
-      points.push(...parseRigPositionLogSheet(workbook, name));
-      usedSheets.push(name);
-    }
+    if(name===snapSheet || /drillplan|hole|list/i.test(name)) return; // steer clear of unrelated hole-plan sheets
+    const result = parseRigPositionLogSheet(workbook, name);
+    if(result && (result.points.length || result.staleRigs.length)) logResults.push(result);
   });
-  return {points, sourceLabel: usedSheets.length ? `sheet ${usedSheets.map(s=>'"'+s+'"').join(', ')} (posisi terakhir per Rig)` : ''};
+
+  // Fresh, dated log entries (verified within RIG_POSITION_MAX_AGE_DAYS of that
+  // sheet's own latest date) take priority per rig over the dateless snapshot —
+  // a rig with no fresh log entry still falls back to POSITION rather than
+  // disappearing from the map entirely, since we'd rather show a possibly-older
+  // point than none at all.
+  const merged = {};
+  snapshotPoints.forEach(p=>{ merged[normalizeRigNumber(p.rigId)] = p; });
+  const staleList = [];
+  logResults.forEach(res=>{
+    res.points.forEach(p=>{ merged[normalizeRigNumber(p.rigId)] = p; });
+    staleList.push(...res.staleRigs.map(id=>`${id} (sheet "${res.sheetName}")`));
+  });
+
+  const sourceParts = [];
+  if(snapSheet) sourceParts.push(`sheet "${snapSheet}"`);
+  if(logResults.length) sourceParts.push(`posisi terverifikasi ≤${RIG_POSITION_MAX_AGE_DAYS} hari dari ${logResults.map(r=>'"'+r.sheetName+'"').join(', ')}`);
+
+  return {
+    points: Object.values(merged),
+    sourceLabel: sourceParts.join(' + ') || '-',
+    staleCount: staleList.length,
+    staleList
+  };
 }
 
 // Finds Hole IDs that were marked Cancel but ALSO appear in the Finished list — a
@@ -4419,7 +4464,8 @@ document.getElementById('rigPosFileInput').addEventListener('change', e=>{
         return;
       }
       rigPositionData = parsed;
-      statusEl.textContent = `✅ "${file.name}" dimuat — ${parsed.points.length} rig (${parsed.sourceLabel}).`;
+      const staleNote = parsed.staleCount ? ` ⚠️ ${parsed.staleCount} rig disembunyikan karena data terakhirnya sudah lebih dari ${RIG_POSITION_MAX_AGE_DAYS} hari (${parsed.staleList.join(', ')}).` : '';
+      statusEl.textContent = `✅ "${file.name}" dimuat — ${parsed.points.length} rig ditampilkan (${parsed.sourceLabel}).${staleNote}`;
       statusEl.className = 'upload-bar status ok';
       document.getElementById('rigPosClearBtn').style.display = 'inline-block';
       if(activeTab==='holetrack') renderHoleMap();
