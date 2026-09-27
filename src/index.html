@@ -1809,6 +1809,16 @@ function captureElementAsJPG(target, options){
   return html2canvas(target, options).finally(()=>{ document.body.classList.remove('exporting'); });
 }
 
+// A large workbook (many MB) is usually large because it carries a lot of live Excel
+// formulas (built up over years of dragging formulas down into new rows), which take
+// much longer for XLSX to parse than plain values of the same visible row count — and
+// can take a minute or more. Warn upfront so a long wait doesn't look like a hang.
+function uploadStartMessage(file){
+  const mb = file.size / (1024*1024);
+  if(mb < 15) return '⏳ Membaca file...';
+  return `⏳ Membaca file (${mb.toFixed(1)} MB — file sebesar ini bisa perlu waktu sampai beberapa menit, terutama kalau banyak sheet/rumus di dalamnya). Mohon tunggu, jangan tutup aplikasi...`;
+}
+
 // Parsing a big consolidated Excel file (e.g. multi-year, multi-contractor "Performance
 // All Contractor" data) with XLSX.read() can take long enough to make the renderer stop
 // responding to Chromium's input/paint loop, which shows up to the user as the OS-level
@@ -1836,6 +1846,21 @@ function readWorkbookOffThread(arrayBuffer){
     };
     worker.postMessage({buffer: arrayBuffer}, [arrayBuffer]);
   });
+}
+
+// A sheet can come back missing from workbook.Sheets even though its name is listed
+// in workbook.SheetNames — SheetJS silently drops a sheet it fails to parse (seen in
+// practice with sheets containing hundreds of thousands of live formulas built up over
+// years of copy-pasting formulas down new rows — a malformed shared-formula range in
+// there can crash the parser's internal array handling). Centralizing the sheet_to_json
+// call lets every upload handler surface one clear, actionable message instead of a
+// cryptic "Cannot read properties of undefined" from deep inside the XLSX library.
+function safeSheetToJson(workbook, sheetName, opts){
+  const sheet = workbook.Sheets[sheetName];
+  if(!sheet){
+    throw new Error(`Sheet "${sheetName}" gagal diparsing (kemungkinan karena rumus/formula Excel yang terlalu banyak atau korup di sheet ini — sering terjadi pada file yang rumusnya sudah di-drag turun bertahun-tahun). Coba di Excel: blok seluruh data di sheet ini → Copy → Paste Special → Values Only → simpan sebagai file baru, lalu upload file baru itu. Kalau ada sheet lain yang tidak dipakai dashboard, hapus juga supaya file lebih ringan & cepat diproses.`);
+  }
+  return XLSX.utils.sheet_to_json(sheet, opts);
 }
 
 function darkenColor(hex, amt){
@@ -2722,8 +2747,7 @@ function findSampleSheet(workbook){
 
 function parseSampleSheet(workbook){
   const sheetName = findSampleSheet(workbook);
-  const sheet = workbook.Sheets[sheetName];
-  const raw = XLSX.utils.sheet_to_json(sheet, {defval:null, raw:true});
+  const raw = safeSheetToJson(workbook, sheetName, {defval:null, raw:true});
   const rows = [];
   raw.forEach(rIn=>{
     const o = {};
@@ -3085,7 +3109,7 @@ document.getElementById('sampleFileInput').addEventListener('change', e=>{
   const file = e.target.files[0];
   if(!file) return;
   const statusEl = document.getElementById('sampleStatusText');
-  statusEl.textContent = '⏳ Membaca file...';
+  statusEl.textContent = uploadStartMessage(file);
   statusEl.className = 'upload-bar status';
   const reader = new FileReader();
   reader.onload = async evt=>{
@@ -3377,8 +3401,7 @@ function findHoleTrackingSheet(workbook){
 //   [next Group title row] ...
 function parseHoleTrackingSheet(workbook){
   const sheetName = findHoleTrackingSheet(workbook);
-  const sheet = workbook.Sheets[sheetName];
-  const rows = XLSX.utils.sheet_to_json(sheet, {header:1, defval:null, raw:true});
+  const rows = safeSheetToJson(workbook, sheetName, {header:1, defval:null, raw:true});
   const out = [];
   let currentGroup = 'Lainnya';
   rows.forEach(r=>{
@@ -3701,7 +3724,7 @@ function parseHoleDetailWorkbook(workbook){
   const redrillSheet = workbook.SheetNames.find(n=>/re-?drill/i.test(n));
   if(!finishedSheet && !planSheet && !cancelSheet) return null; // not this format
 
-  const getRows = (sheetName)=> sheetName ? XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {defval:null, raw:true}) : [];
+  const getRows = (sheetName)=> sheetName ? safeSheetToJson(workbook, sheetName, {defval:null, raw:true}) : [];
 
   const finished = getRows(finishedSheet).map(r=>{
     const nm = buildNormKeyMap(r);
@@ -4500,7 +4523,7 @@ document.getElementById('htFileInput').addEventListener('change', e=>{
   const file = e.target.files[0];
   if(!file) return;
   const statusEl = document.getElementById('htStatusText');
-  statusEl.textContent = '⏳ Membaca file...';
+  statusEl.textContent = uploadStartMessage(file);
   statusEl.className = 'upload-bar status';
   const reader = new FileReader();
   reader.onload = async evt=>{
@@ -4856,14 +4879,14 @@ document.getElementById('pacFileInput').addEventListener('change', e=>{
   const file = e.target.files[0];
   if(!file) return;
   const statusEl = document.getElementById('pacStatusText');
-  statusEl.textContent = '⏳ Membaca file...';
+  statusEl.textContent = uploadStartMessage(file);
   statusEl.className = 'upload-bar status';
   const reader = new FileReader();
   reader.onload = async evt=>{
     try{
       const workbook = await readWorkbookOffThread(evt.target.result);
       const sheetName = findDatabaseSheet(workbook);
-      const raw = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {defval:null, raw:true});
+      const raw = safeSheetToJson(workbook, sheetName, {defval:null, raw:true});
       const rows = raw.map(normalizeRow).filter(Boolean);
 
       const uniqueContractors = new Set(rows.map(r=>r.contractor).filter(Boolean));
@@ -4929,8 +4952,7 @@ function findDatabaseSheet(workbook){
 
 function processWorkbook(workbook, filename){
   const sheetName = findDatabaseSheet(workbook);
-  const sheet = workbook.Sheets[sheetName];
-  const raw = XLSX.utils.sheet_to_json(sheet, {defval:null, raw:true});
+  const raw = safeSheetToJson(workbook, sheetName, {defval:null, raw:true});
   const rows = raw.map(normalizeRow).filter(Boolean);
 
   if(!rows.length){
@@ -5007,7 +5029,7 @@ function setStatus(msg, isErr){
 
 function handleFile(file){
   if(!file) return;
-  setStatus('⏳ Membaca file...', false);
+  setStatus(uploadStartMessage(file), false);
   const reader = new FileReader();
   reader.onload = async function(evt){
     try{
