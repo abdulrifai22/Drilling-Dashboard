@@ -123,6 +123,13 @@
   // ---------- Update banner ----------
 
   var banner, bannerMsg, btnUpdateNow, btnRemindLater, btnChangelog;
+  // Set by injectSettingsPanel() once its "Memeriksa pembaruan..." label exists, so
+  // handleUpdateStatus() can update it when the check finishes — otherwise that label
+  // is only ever written once (on click) and never cleared, so it looks stuck forever
+  // even though the check itself completed (its real result only ever reached a toast,
+  // which disappears after 4s).
+  var settingsStatusText;
+  var checkTimeoutId;
 
   function buildBanner() {
     bannerMsg = el('div', { class: 'dds-msg' }, []);
@@ -164,13 +171,28 @@
     });
   }
 
+  function clearCheckTimeout() {
+    if (checkTimeoutId) { clearTimeout(checkTimeoutId); checkTimeoutId = null; }
+  }
+
   function handleUpdateStatus(data) {
     if (!banner) buildBanner();
     var state = data.state;
     var payload = data.payload || {};
 
-    if (state === 'available') {
+    if (state === 'checking') {
+      if (settingsStatusText) settingsStatusText.textContent = 'Memeriksa pembaruan...';
+      clearCheckTimeout();
+      // electron-updater has no hard timeout of its own — if GitHub is briefly
+      // unreachable the check can hang far longer than a normal check ever should.
+      // This doesn't cancel anything, it just stops the label from looking stuck.
+      checkTimeoutId = setTimeout(function () {
+        if (settingsStatusText) settingsStatusText.textContent = 'Masih menunggu respon dari GitHub... cek koneksi internet Anda kalau ini berlangsung lama.';
+      }, 15000);
+    } else if (state === 'available') {
       manualCheckInFlight = false;
+      clearCheckTimeout();
+      if (settingsStatusText) settingsStatusText.textContent = 'Update tersedia: versi ' + payload.latestVersion + ' (versi saat ini ' + payload.currentVersion + ').';
       bannerMsg.innerHTML =
         'Update tersedia — versi saat ini <b>' + payload.currentVersion +
         '</b>, versi terbaru <b>' + payload.latestVersion + '</b>.';
@@ -179,26 +201,34 @@
       btnUpdateNow.onclick = startUpdateFlow;
       banner.classList.add('show');
     } else if (state === 'not-available') {
+      clearCheckTimeout();
+      if (settingsStatusText) settingsStatusText.textContent = 'Sudah versi terbaru (' + (payload.currentVersion || appInfo.version) + ').';
       if (manualCheckInFlight) {
         manualCheckInFlight = false;
         toast('Anda menggunakan versi terbaru.');
       }
     } else if (state === 'not-configured') {
+      clearCheckTimeout();
+      if (settingsStatusText) settingsStatusText.textContent = 'Update checker belum dikonfigurasi (config/update.config.json).';
       if (manualCheckInFlight) {
         manualCheckInFlight = false;
         toast('Update checker belum dikonfigurasi (config/update.config.json).');
       }
     } else if (state === 'downloading') {
+      if (settingsStatusText) settingsStatusText.textContent = 'Mendownload update... ' + (payload.percent || 0) + '%';
       btnUpdateNow.disabled = true;
       btnUpdateNow.textContent = 'Mendownload... ' + (payload.percent || 0) + '%';
       banner.classList.add('show');
     } else if (state === 'downloaded') {
+      if (settingsStatusText) settingsStatusText.textContent = 'Update ' + payload.latestVersion + ' siap diinstall.';
       bannerMsg.innerHTML = 'Update <b>' + payload.latestVersion + '</b> siap diinstall.';
       btnUpdateNow.disabled = false;
       btnUpdateNow.textContent = 'Restart & Install';
       btnUpdateNow.onclick = function () { window.dashboardAPI.quitAndInstall(); };
       banner.classList.add('show');
     } else if (state === 'error') {
+      clearCheckTimeout();
+      if (settingsStatusText) settingsStatusText.textContent = 'Gagal memeriksa update: ' + payload.message;
       if (manualCheckInFlight) {
         manualCheckInFlight = false;
         toast('Gagal memeriksa update: ' + payload.message);
@@ -226,6 +256,7 @@
     if (!tab) return;
 
     var statusText = el('div', { class: 'dds-status-text' }, []);
+    settingsStatusText = statusText;
 
     var checkBtn = el('button', {}, []);
     checkBtn.textContent = 'Check for Update';
