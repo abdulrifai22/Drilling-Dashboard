@@ -1871,6 +1871,27 @@ function safeSheetToJson(workbook, sheetName, opts){
   if(!sheet){
     throw new Error(`Sheet "${sheetName}" gagal diparsing (kemungkinan karena rumus/formula Excel yang terlalu banyak atau korup di sheet ini — sering terjadi pada file yang rumusnya sudah di-drag turun bertahun-tahun). Coba di Excel: blok seluruh data di sheet ini → Copy → Paste Special → Values Only → simpan sebagai file baru, lalu upload file baru itu. Kalau ada sheet lain yang tidak dipakai dashboard, hapus juga supaya file lebih ringan & cepat diproses.`);
   }
+  // Sheet yang rentangnya terdaftar sampai baris ~1 juta padahal datanya cuma ribuan baris
+  // (format/rumus di-drag sampai bawah) bikin sheet_to_json berjalan lama dan aplikasi terasa macet.
+  // Potong rentangnya sampai baris terakhir yang benar-benar berisi nilai.
+  const ref = sheet['!ref'];
+  if(ref && !(opts && opts.range!==undefined)){
+    const range = XLSX.utils.decode_range(ref);
+    if(range.e.r - range.s.r > 20000){
+      let lastRow = range.s.r;
+      Object.keys(sheet).forEach(k=>{
+        if(k[0]==='!') return;
+        const c = sheet[k];
+        if(!c || c.v===undefined || c.v===null || c.v==='') return;
+        const r = XLSX.utils.decode_cell(k).r;
+        if(r>lastRow) lastRow = r;
+      });
+      if(lastRow < range.e.r){
+        range.e.r = lastRow;
+        opts = Object.assign({}, opts, {range: XLSX.utils.encode_range(range)});
+      }
+    }
+  }
   return XLSX.utils.sheet_to_json(sheet, opts);
 }
 
@@ -3902,11 +3923,38 @@ function buildNormKeyMap(row){
 // File Hole Finish BPMS menulis Rig ID sebagai angka saja ("1", "15"), sedangkan data OEE
 // memakai "BPMS-01" / "BPMS-15". Samakan ke format OEE (pakai kolom kontraktor di baris itu)
 // supaya cross-check Hole Finish per Rig tidak menandai semua hole sebagai "Rig tidak cocok".
+// File BPMS lain lagi menulis "BPMS-1" / "BPMS - 05" → samakan juga ke "BPMS-01" / "BPMS-05".
 function normalizeHoleFileRig(rig, contractor){
   if(rig===null || rig===undefined || rig==='') return null;
   const s = String(rig).trim();
-  if(/^\d+$/.test(s) && contractor) return `${String(contractor).trim().toUpperCase()}-${s.padStart(2,'0')}`;
-  return s;
+  if(/^\d+$/.test(s) && contractor) return `${String(contractor).trim().toUpperCase()}-${s.replace(/^0+(?=\d)/,'').padStart(2,'0')}`;
+  return canonRigId(s);
+}
+// "BPMS-1", "BPMS - 01", "bpms_1" → "BPMS-01". Label yang bukan pola huruf+angka dibiarkan apa adanya.
+function canonRigId(rig){
+  const s = String(rig).trim();
+  const m = s.match(/^([A-Za-z]+)\s*[-_ ]?\s*0*(\d+)$/);
+  return m ? `${m[1].toUpperCase()}-${m[2].padStart(2,'0')}` : s;
+}
+
+// Penulisan sub-pit bisa beda antar sheet di file yang sama (mis. "KRENE-4" di Hole_Plan tapi
+// "KRENE_4" di Hole_Cancel) — kalau dibiarkan, cancel-nya masuk ke baris sub-pit terpisah dan Sisa
+// Hole jadi salah. Satukan per kunci (huruf besar, spasi/-/_ disamakan); labelnya pakai variasi
+// yang paling sering dipakai, jadi file yang sudah konsisten (mis. "BLW 4") tidak berubah.
+function unifyHoleDetailSubpits(lists){
+  const key = v => String(v).trim().toUpperCase().replace(/[\s_\-]+/g,'_');
+  const freq = {};
+  lists.forEach(list=>list.forEach(r=>{
+    if(r.subpit===null || r.subpit===undefined || r.subpit==='') return;
+    const k = key(r.subpit), raw = String(r.subpit).trim();
+    (freq[k] ??= {})[raw] = (freq[k][raw]||0) + 1;
+  }));
+  const label = {};
+  Object.keys(freq).forEach(k=>{ label[k] = Object.entries(freq[k]).sort((a,b)=>b[1]-a[1])[0][0]; });
+  lists.forEach(list=>list.forEach(r=>{
+    if(r.subpit===null || r.subpit===undefined || r.subpit==='') return;
+    r.subpit = label[key(r.subpit)];
+  }));
 }
 
 // Kontraktor pemilik file detail hole: kolom kontraktor di baris Hole Finish, atau awalan
@@ -4015,6 +4063,7 @@ function parseHoleDetailWorkbook(workbook){
     };
   }).filter(r=>r.holeId);
 
+  unifyHoleDetailSubpits([finished, plan, cancel, redrill]);
   return {finished, plan, cancel, redrill, sheets:{finishedSheet, planSheet, cancelSheet, redrillSheet}};
 }
 
@@ -4259,7 +4308,7 @@ function computeHoleFinishReconciliation(subpitFilter){
     let issue = null;
     if(o && !f) issue = 'Belum tercatat di file Hole Finish';
     else if(f && !o) issue = 'Tidak berstatus Finish di data OEE';
-    else if(oeeRig && fileRig && oeeRig.toLowerCase()!==fileRig.toLowerCase()) issue = `Rig tidak cocok (OEE: ${oeeRig} — File: ${fileRig})`;
+    else if(oeeRig && fileRig && canonRigId(oeeRig)!==canonRigId(fileRig)) issue = `Rig tidak cocok (OEE: ${oeeRig} — File: ${fileRig})`;
     else if(oeeRig && !fileRig) issue = 'Rig tidak tercatat di file Hole Finish';
     result.push({ holeId, rig: oeeRig||fileRig||'TANPA RIG', oeeRig, fileRig, subpit, inOEE:!!o, inFile:!!f, ok:!issue, issue });
   });
