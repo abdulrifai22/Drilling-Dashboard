@@ -3540,6 +3540,12 @@ function getFilteredHtRows(){
 // Keeps the Hole Tracking contractor filter in sync with the main daily file's
 // detected Contractor (e.g. GGM), unless the user has manually picked a filter.
 function syncHtContractorWithMain(DATA){
+  if(holeDetailData){
+    if(!htAutoFilterByMainContractor) return;
+    const next = mainHoleDetailContractor();
+    if(next && next!==holeDetailContractor){ selectHoleDetailContractor(next); renderHoleDetailViews(); }
+    return;
+  }
   if(!htAutoFilterByMainContractor || !htRows || !htRows.length || !DATA) return;
   const contractors = new Set(htRows.map(r=>r.kontraktor));
   htContractorFilter = (DATA.contractor && contractors.has(DATA.contractor)) ? DATA.contractor : '';
@@ -3663,6 +3669,12 @@ function populateHtSubpitFilterFromDetail(){
   htSubpitFilter = sel.value;
 }
 document.getElementById('ht-contractorFilter').addEventListener('change', e=>{
+  if(holeDetailData){
+    htAutoFilterByMainContractor = false; // pilih manual → berhenti mengikuti file OEE sampai file OEE baru diupload
+    selectHoleDetailContractor(e.target.value);
+    renderHoleDetailViews();
+    return;
+  }
   htContractorFilter = e.target.value;
   htSubpitFilter = ''; // sub-pit list depends on contractor, so reset it
   htAutoFilterByMainContractor = false; // user took manual control of the filter
@@ -3789,7 +3801,8 @@ function renderOverviewHoleTrackingSummary(){
     cardsEl.innerHTML = buildSummaryCardsHtml(t);
     cardsEl.style.display = 'grid';
     emptyEl.style.display = 'none';
-    subEl.textContent = htSubpitFilter ? `(sub-pit: ${htSubpitFilter} — lihat detail di tab "Hole Track")` : '(semua sub-pit — lihat detail di tab "Hole Track")';
+    const ctr = holeDetailContractor ? `${holeDetailContractor} · ` : '';
+    subEl.textContent = htSubpitFilter ? `(${ctr}sub-pit: ${htSubpitFilter} — lihat detail di tab "Hole Track")` : `(${ctr}semua sub-pit — lihat detail di tab "Hole Track")`;
   } else if(htRows && htRows.length){
     const filteredRows = getFilteredHtRows();
     const totals = holeTrackingTotals(filteredRows);
@@ -3812,7 +3825,11 @@ function renderOverviewHoleTrackingSummary(){
    aggregated "TRACKING" sheet and the log-derived fallback, since it
    gives per-hole detail (coordinates, remarks) for drill-down and map.
 ===================================================================== */
-let holeDetailData = null; // {finished, plan, cancel, redrill} or null
+let holeDetailData = null; // {finished, plan, cancel, redrill} or null — file detail yang SEDANG ditampilkan
+// Semua file detail yang sudah diupload sesi ini, per kontraktor ({GGM: detail, BPMS: detail}).
+// Yang ditampilkan (holeDetailData) otomatis mengikuti Contractor file OEE — sama seperti tab Sample.
+let holeDetailByContractor = {};
+let holeDetailContractor = ''; // kunci holeDetailByContractor yang sedang tampil
 let htDrilldownCategory = null; // 'plan' | 'finish' | 'cancel' | null
 let htReconcileRigFilter = null; // Rig ID selected in the Hole Finish per-Rig reconciliation table, or null for all
 let rigPositionData = null; // {points:[{rigId,x,y,note,date,remark,subpit}], sourceLabel} or null = not uploaded yet
@@ -3892,6 +3909,52 @@ function normalizeHoleFileRig(rig, contractor){
   return s;
 }
 
+// Kontraktor pemilik file detail hole: kolom kontraktor di baris Hole Finish, atau awalan
+// Rig ID ("GGM-41", "BPMS-01"); kalau tidak ada, dari nama file; terakhir dari file OEE aktif.
+function detectHoleDetailContractor(detail, filename){
+  const votes = {};
+  detail.finished.forEach(r=>{
+    const c = r.contractor || (String(r.rig||'').match(/^([A-Za-z]+)[-_\s]?\d+$/)||[])[1];
+    if(c){ const k = String(c).trim().toUpperCase(); votes[k] = (votes[k]||0)+1; }
+  });
+  const best = Object.entries(votes).sort((a,b)=>b[1]-a[1])[0];
+  if(best) return best[0];
+  const m = String(filename||'').toUpperCase().match(/(?:^|[^A-Z])(GGM|BPMS)(?:[^A-Z]|$)/);
+  if(m) return m[1];
+  if(!usingDemo && currentDATA && currentDATA.contractor && !/\//.test(currentDATA.contractor)) return String(currentDATA.contractor).trim().toUpperCase();
+  return 'LAINNYA';
+}
+
+// Kontraktor file detail yang cocok dengan Contractor file OEE aktif ('' = tidak ada yang cocok).
+function mainHoleDetailContractor(){
+  if(usingDemo || !currentDATA || !currentDATA.contractor) return '';
+  const main = String(currentDATA.contractor).trim().toUpperCase();
+  return holeDetailByContractor[main] ? main : '';
+}
+
+function selectHoleDetailContractor(c){
+  if(!holeDetailByContractor[c]) return;
+  holeDetailContractor = c;
+  holeDetailData = holeDetailByContractor[c];
+  htSubpitFilter = '';
+  htDrilldownCategory = null;
+  htReconcileRigFilter = null;
+  populateHtDetailContractorFilter();
+  populateHtSubpitFilterFromDetail();
+}
+function populateHtDetailContractorFilter(){
+  const sel = document.getElementById('ht-contractorFilter');
+  if(!sel) return;
+  const list = Object.keys(holeDetailByContractor).sort();
+  sel.innerHTML = list.map(c=>`<option value="${c}">${c}</option>`).join('');
+  sel.value = holeDetailContractor;
+}
+function renderHoleDetailViews(){
+  if(activeTab==='holetrack') renderHoleTrackingDetail();
+  renderOverviewHoleTrackingSummary();
+  updateSidebarBadges();
+}
+
 function parseHoleDetailWorkbook(workbook){
   // GGM: sheet "LIST HOLE FINISHED" (+ Hole_Plan / Hole_Cancel).
   // BPMS: satu sheet "Tracking Hole Finish" saja — tanpa Plan/Cancel/koordinat/sub-pit.
@@ -3913,6 +3976,7 @@ function parseHoleDetailWorkbook(workbook){
       x: parseNumLoose(getField(r,nm,'X')), y: parseNumLoose(getField(r,nm,'Y')), z: parseNumLoose(getField(r,nm,'Z')),
       depth: parseNumLoose(getField(r,nm,'Depth hole finished','Depth(M)','Depth')),
       dpo: getField(r,nm,'DPO Tracking','DPO','DPO_Tracking'),
+      contractor: getField(r,nm,'Drill Contractor','Contractor','Kontraktor'),
       rig: normalizeHoleFileRig(getField(r,nm,'Rig ID','Rig name','NoRig'), getField(r,nm,'Drill Contractor','Contractor','Kontraktor')),
       startDate: getField(r,nm,'StartDrilling','Start Date'), finishDate: getField(r,nm,'FinishDrilling','End Date','Finish Date'),
       totalSample: parseNumLoose(getField(r,nm,'Total Sample')), recovery: parseNumLoose(getField(r,nm,'Hole Recovery (%)','Recovery')),
@@ -4326,9 +4390,10 @@ function exportHoleDrilldownJPG(){
 }
 
 function renderHoleTrackingDetail(){
+  const ctr = holeDetailContractor ? ` ${holeDetailContractor}${htAutoFilterByMainContractor && mainHoleDetailContractor()===holeDetailContractor ? ' (ikut data OEE)' : ''}` : '';
   document.getElementById('ht-subtitle').textContent = htSubpitFilter
-    ? `(sumber: file detail hole — sub-pit: ${htSubpitFilter})`
-    : '(sumber: file detail hole — semua sub-pit)';
+    ? `(sumber: file detail hole${ctr} — sub-pit: ${htSubpitFilter})`
+    : `(sumber: file detail hole${ctr} — semua sub-pit)`;
   document.getElementById('ht-note').innerHTML = `Data diambil dari daftar hole per-baris (sheet "${holeDetailData.sheets.finishedSheet||'-'}", "${holeDetailData.sheets.planSheet||'-'}", "${holeDetailData.sheets.cancelSheet||'-'}"). <b>Klik kartu Drill Plan / Hole Finish / Hole Cancel</b> untuk melihat daftar Hole ID beserta keterangannya. Total Meter dihitung dari kolom Depth hole finished.`;
 
   const totals = computeHoleDetailTotals(holeDetailData, htSubpitFilter);
@@ -4919,20 +4984,21 @@ document.getElementById('htFileInput').addEventListener('change', e=>{
       // Try the new detailed per-hole format first (LIST HOLE FINISHED / Hole_Plan / Hole_Cancel)
       const detail = parseHoleDetailWorkbook(workbook);
       if(detail && (detail.finished.length || detail.plan.length || detail.cancel.length)){
-        holeDetailData = detail;
+        const contractor = detectHoleDetailContractor(detail, file.name);
+        if(!holeDetailData) holeDetailByContractor = {}; // sebelumnya format ringkasan lama / belum ada → mulai baru
+        holeDetailByContractor[contractor] = detail;     // file kontraktor yang sama → menggantikan yang lama
         htRows = null;
-        htSubpitFilter = '';
-        htDrilldownCategory = null;
-        htReconcileRigFilter = null;
-        populateHtSubpitFilterFromDetail();
+        // Tampilkan kontraktor yang cocok dengan file OEE; kalau tidak ada yang cocok, tampilkan file yang baru diupload.
+        const show = (htAutoFilterByMainContractor && mainHoleDetailContractor()) || contractor;
+        selectHoleDetailContractor(show);
         const finishOnly = !detail.plan.length && !detail.sheets.cancelSheet;
-        statusEl.textContent = finishOnly
-          ? `✅ "${file.name}" dimuat — sheet "${detail.sheets.finishedSheet}", ${detail.finished.length} hole finish, total ${detail.finished.reduce((a,r)=>a+(r.depth||0),0).toLocaleString('id-ID')} m. File ini hanya berisi daftar Hole Finish (tanpa Plan/Cancel/koordinat), jadi Drill Plan, Sisa Hole, % Completion & peta hole tidak tersedia.`
-          : `✅ "${file.name}" dimuat — ${detail.finished.length} hole finish, ${detail.plan.length} hole plan, ${detail.cancel.length} hole cancel.`;
+        let msg = finishOnly
+          ? `✅ "${file.name}" dimuat sebagai data ${contractor} — sheet "${detail.sheets.finishedSheet}", ${detail.finished.length} hole finish, total ${detail.finished.reduce((a,r)=>a+(r.depth||0),0).toLocaleString('id-ID')} m. File ini hanya berisi daftar Hole Finish (tanpa Plan/Cancel/koordinat), jadi Drill Plan, Sisa Hole, % Completion & peta hole tidak tersedia.`
+          : `✅ "${file.name}" dimuat sebagai data ${contractor} — ${detail.finished.length} hole finish, ${detail.plan.length} hole plan, ${detail.cancel.length} hole cancel.`;
+        if(show!==contractor) msg += ` Tampilan tetap ${show} mengikuti file OEE — pilih ${contractor} di Filter Kontraktor untuk melihatnya.`;
+        statusEl.textContent = msg;
         statusEl.className = 'upload-bar status ok';
-        if(activeTab==='holetrack') renderHoleTrackingDetail();
-        renderOverviewHoleTrackingSummary();
-        updateSidebarBadges();
+        renderHoleDetailViews();
         logUpload('Hole Track (Detail)', file.name, detail.finished.length+detail.plan.length+detail.cancel.length);
         return;
       }
@@ -4945,6 +5011,8 @@ document.getElementById('htFileInput').addEventListener('change', e=>{
         return;
       }
       holeDetailData = null;
+      holeDetailByContractor = {};
+      holeDetailContractor = '';
       htRows = parsed.rows;
       htContractorFilter = '';
       htAutoFilterByMainContractor = true;
@@ -5365,6 +5433,7 @@ function processWorkbook(workbook, filename){
   ovLocationFilter = '';
   populateLocationFilter();
   sampleAutoFollowMain = true;   // file OEE baru → data sample kembali mengikuti kontraktornya
+  if(holeDetailData) htAutoFilterByMainContractor = true; // begitu juga file detail Hole Track
   logUpload('OEE Drilling', filename, rows.length);
 
   renderFromSelectedDate();
