@@ -3,6 +3,11 @@
 Semua perubahan penting pada aplikasi ini dicatat di file ini.
 Format versi mengikuti [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`.
 
+## Version 1.3.1
+- Tambahan: tab Hole Track bisa membaca file Hole Finish format BPMS (sheet "Tracking Hole Finish") — sebelumnya file ini salah terbaca sebagai format ringkasan "TRACKING" lama.
+- Rig ID di file Hole Finish BPMS yang ditulis angka saja ("1", "15") otomatis disamakan ke format OEE ("BPMS-01", "BPMS-15"), supaya cross-check Hole Finish per Rig tidak menandai semua hole sebagai "Rig tidak cocok". Kolom Deposit dipakai sebagai pengelompokan karena file BPMS tidak punya kolom sub-pit.
+- Untuk file yang hanya berisi daftar Hole Finish (tanpa Plan/Cancel), kartu Drill Plan, Sisa Hole, Hole Cancel & % Completion menampilkan "-" alih-alih 0 / 0%. Detail Hole Finish juga menampilkan Total Sample & Recovery (%) bila tersedia.
+
 ## Version 1.3.0
 - Tambahan: sumber data sample BPMS (Google Sheet "WBN Sample Tracking") di tab Sample — tombol 🔄 Refresh Google Sheet sekarang menarik data GGM dan BPMS sekaligus lalu menggabungkannya. Panel ⚙️ Sumber berisi satu baris per kontraktor (plus link ke Looker Studio BPMS).
 - Tambahan: filter Kontraktor di tab Sample, dan kolom Kontraktor di tabel Detail Sample Tracking, drilldown DPO, serta export Excel-nya.

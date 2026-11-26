@@ -3604,13 +3604,15 @@ function holeTrackingTotals(rowsArr){
 
 function buildSummaryCardsHtml(t){
   const color = t.pctComplete>=80?colors.green:(t.pctComplete>=50?colors.amber:colors.red);
+  const noPlan = t.hasPlan===false, noCancel = t.hasCancel===false;
+  const NA = {val:'-', unit:'tidak ada di file ini', color:colors.muted};
   const cards = [
-    {icon:'📋',label:'TOTAL DRILL PLAN',val:t.drillplan,unit:'HOLE'},
+    Object.assign({icon:'📋',label:'TOTAL DRILL PLAN',val:t.drillplan,unit:'HOLE'}, noPlan?NA:{}),
     {icon:'✅',label:'HOLE FINISH',val:t.holeFinish,unit:'HOLE'},
-    {icon:'⏳',label:'SISA HOLE (REMAINING)',val:t.remainingHole,unit:'HOLE',color:t.remainingHole>0?colors.amber:colors.green},
-    {icon:'❌',label:'HOLE CANCEL',val:(t.cancel!==undefined && t.cancel!==null) ? t.cancel : '-',unit:'HOLE',color:t.cancel>0?colors.red:colors.muted},
+    Object.assign({icon:'⏳',label:'SISA HOLE (REMAINING)',val:t.remainingHole,unit:'HOLE',color:t.remainingHole>0?colors.amber:colors.green}, noPlan?NA:{}),
+    Object.assign({icon:'❌',label:'HOLE CANCEL',val:(t.cancel!==undefined && t.cancel!==null) ? t.cancel : '-',unit:'HOLE',color:t.cancel>0?colors.red:colors.muted}, noCancel?NA:{}),
     {icon:'📏',label:'TOTAL METER',val:t.meter.toLocaleString('id-ID'),unit:'METER'},
-    {icon:'🟢',label:'% COMPLETION',val:t.pctComplete+'%',unit:'DARI PLAN ACTUAL',color:color},
+    Object.assign({icon:'🟢',label:'% COMPLETION',val:t.pctComplete+'%',unit:'DARI PLAN ACTUAL',color:color}, noPlan?NA:{}),
   ];
   return cards.map(k=>`
     <div class="kpi">
@@ -3880,8 +3882,21 @@ function buildNormKeyMap(row){
   return map;
 }
 
+// File Hole Finish BPMS menulis Rig ID sebagai angka saja ("1", "15"), sedangkan data OEE
+// memakai "BPMS-01" / "BPMS-15". Samakan ke format OEE (pakai kolom kontraktor di baris itu)
+// supaya cross-check Hole Finish per Rig tidak menandai semua hole sebagai "Rig tidak cocok".
+function normalizeHoleFileRig(rig, contractor){
+  if(rig===null || rig===undefined || rig==='') return null;
+  const s = String(rig).trim();
+  if(/^\d+$/.test(s) && contractor) return `${String(contractor).trim().toUpperCase()}-${s.padStart(2,'0')}`;
+  return s;
+}
+
 function parseHoleDetailWorkbook(workbook){
-  const finishedSheet = workbook.SheetNames.find(n=>/list\s*hole\s*finished/i.test(n));
+  // GGM: sheet "LIST HOLE FINISHED" (+ Hole_Plan / Hole_Cancel).
+  // BPMS: satu sheet "Tracking Hole Finish" saja — tanpa Plan/Cancel/koordinat/sub-pit.
+  const finishedSheet = workbook.SheetNames.find(n=>/list\s*hole\s*finished/i.test(n))
+    || workbook.SheetNames.find(n=>/hole\s*_?finish/i.test(n));
   const planSheet = workbook.SheetNames.find(n=>/hole_?plan/i.test(n));
   const cancelSheet = workbook.SheetNames.find(n=>/hole_?cancel/i.test(n));
   const redrillSheet = workbook.SheetNames.find(n=>/re-?drill/i.test(n));
@@ -3893,12 +3908,14 @@ function parseHoleDetailWorkbook(workbook){
     const nm = buildNormKeyMap(r);
     return {
       holeId: getField(r,nm,'Hole Id','HoleId','Hole_ID'),
-      subpit: getField(r,nm,'Sub-pit','Sub_pit','SUB-Pit'),
+      // BPMS tidak punya kolom sub-pit → pakai Deposit (mis. "KRENE") sebagai pengelompokan.
+      subpit: getField(r,nm,'Sub-pit','Sub_pit','SUB-Pit','Deposit'),
       x: parseNumLoose(getField(r,nm,'X')), y: parseNumLoose(getField(r,nm,'Y')), z: parseNumLoose(getField(r,nm,'Z')),
       depth: parseNumLoose(getField(r,nm,'Depth hole finished','Depth(M)','Depth')),
       dpo: getField(r,nm,'DPO Tracking','DPO','DPO_Tracking'),
-      rig: getField(r,nm,'Rig ID','Rig name','NoRig'),
-      startDate: getField(r,nm,'StartDrilling'), finishDate: getField(r,nm,'FinishDrilling'),
+      rig: normalizeHoleFileRig(getField(r,nm,'Rig ID','Rig name','NoRig'), getField(r,nm,'Drill Contractor','Contractor','Kontraktor')),
+      startDate: getField(r,nm,'StartDrilling','Start Date'), finishDate: getField(r,nm,'FinishDrilling','End Date','Finish Date'),
+      totalSample: parseNumLoose(getField(r,nm,'Total Sample')), recovery: parseNumLoose(getField(r,nm,'Hole Recovery (%)','Recovery')),
       status: getField(r,nm,'Status'), remark: getField(r,nm,'Remarks','Remark')
     };
   }).filter(r=>r.holeId);
@@ -4132,7 +4149,10 @@ function computeHoleDetailTotals(data, subpitFilter){
   const meter = f.reduce((a,r)=>a+(r.depth||0),0);
   const remainingHole = Math.max(drillplan - holeFinish - cancelCount, 0);
   const pctComplete = drillplan>0 ? round1(holeFinish/drillplan*100) : 0;
-  return {drillplan, holeFinish, cancel:cancelCount, meter, remainingHole, pctComplete, conflictCount:conflicts.size};
+  // File yang hanya berisi daftar Hole Finish (format BPMS) tidak punya Plan/Cancel —
+  // tampilkan "-" alih-alih 0 / 0%, supaya tidak terbaca seolah progres 0%.
+  const hasPlan = data.plan.length>0, hasCancel = !!(data.sheets && data.sheets.cancelSheet);
+  return {drillplan, holeFinish, cancel:cancelCount, meter, remainingHole, pctComplete, conflictCount:conflicts.size, hasPlan, hasCancel};
 }
 
 function computeHoleDetailPerSubpit(){
@@ -4207,13 +4227,15 @@ function computeRemainingHoleList(data, subpitFilter){
 
 function buildClickableSummaryCardsHtml(t){
   const color = t.pctComplete>=80?colors.green:(t.pctComplete>=50?colors.amber:colors.red);
+  const noPlan = t.hasPlan===false, noCancel = t.hasCancel===false;
+  const NA = {val:'-', unit:'tidak ada di file ini', color:colors.muted, key:null};
   const cards = [
-    {icon:'📋',label:'TOTAL DRILL PLAN',val:t.drillplan,unit:'HOLE — klik untuk detail',key:'plan'},
+    Object.assign({icon:'📋',label:'TOTAL DRILL PLAN',val:t.drillplan,unit:'HOLE — klik untuk detail',key:'plan'}, noPlan?NA:{}),
     {icon:'✅',label:'HOLE FINISH',val:t.holeFinish,unit:'HOLE — klik untuk detail',key:'finish'},
-    {icon:'⏳',label:'SISA HOLE (REMAINING)',val:t.remainingHole,unit:'HOLE — klik untuk detail',color:t.remainingHole>0?colors.amber:colors.green,key:'remaining'},
-    {icon:'❌',label:'HOLE CANCEL',val:t.cancel,unit:'HOLE — klik untuk detail',color:t.cancel>0?colors.red:colors.muted,key:'cancel'},
+    Object.assign({icon:'⏳',label:'SISA HOLE (REMAINING)',val:t.remainingHole,unit:'HOLE — klik untuk detail',color:t.remainingHole>0?colors.amber:colors.green,key:'remaining'}, noPlan?NA:{}),
+    Object.assign({icon:'❌',label:'HOLE CANCEL',val:t.cancel,unit:'HOLE — klik untuk detail',color:t.cancel>0?colors.red:colors.muted,key:'cancel'}, noCancel?NA:{}),
     {icon:'📏',label:'TOTAL METER',val:t.meter.toLocaleString('id-ID'),unit:'METER (depth hole finished)'},
-    {icon:'🟢',label:'% COMPLETION',val:t.pctComplete+'%',unit:'DARI DRILL PLAN',color:color},
+    Object.assign({icon:'🟢',label:'% COMPLETION',val:t.pctComplete+'%',unit:'DARI DRILL PLAN',color:color}, noPlan?NA:{}),
   ];
   return cards.map(k=>`
     <div class="kpi"${k.key?` style="cursor:pointer;" onclick="showHoleDrilldown('${k.key}')"`:''}>
@@ -4256,7 +4278,8 @@ function renderHoleDrilldownPanel(){
     html += `<div class="field-note" style="margin-bottom:10px;">Hole ID di bawah ini ada di rencana (Hole Plan) tapi belum ditemukan di Hole Finish maupun Hole Cancel — artinya belum dikerjakan sama sekali.</div>`;
   }
   html += '<div class="table-wrap" style="max-height:360px;"><table><tr><th>No.</th><th>Hole ID</th><th>Sub-Pit</th><th>X</th><th>Y</th>';
-  if(htDrilldownCategory==='finish') html += '<th>Depth</th><th>DPO</th><th>Rig</th><th>Finish Date</th>';
+  const showSampleCols = htDrilldownCategory==='finish' && rows.some(r=>r.totalSample!=null || r.recovery!=null);
+  if(htDrilldownCategory==='finish') html += '<th>Depth</th><th>DPO</th><th>Rig</th><th>Finish Date</th>' + (showSampleCols?'<th>Total Sample</th><th>Recovery (%)</th>':'');
   if(htDrilldownCategory==='cancel') html += '<th>Date</th><th>Remark</th>';
   if(htDrilldownCategory==='plan' || htDrilldownCategory==='remaining') html += '<th>Min Depth</th><th>Remark</th>';
   html += '</tr>';
@@ -4265,7 +4288,7 @@ function renderHoleDrilldownPanel(){
   } else {
     rows.slice(0,500).forEach((r,i)=>{
       html += `<tr><td>${i+1}</td><td><b>${r.holeId}</b></td><td>${r.subpit||'-'}</td><td>${r.x?.toFixed?r.x.toFixed(2):(r.x??'-')}</td><td>${r.y?.toFixed?r.y.toFixed(2):(r.y??'-')}</td>`;
-      if(htDrilldownCategory==='finish'){ const fd = toDateOnly(r.finishDate); html += `<td>${r.depth??'-'}</td><td>${r.dpo||'-'}</td><td>${r.rig||'-'}</td><td>${fd?fmtDate(fd):'-'}</td>`; }
+      if(htDrilldownCategory==='finish'){ const fd = toDateOnly(r.finishDate); html += `<td>${r.depth??'-'}</td><td>${r.dpo||'-'}</td><td>${r.rig||'-'}</td><td>${fd?fmtDate(fd):'-'}</td>` + (showSampleCols?`<td>${r.totalSample??'-'}</td><td>${r.recovery??'-'}</td>`:''); }
       if(htDrilldownCategory==='cancel'){ const cd = toDateOnly(r.date); html += `<td>${cd?fmtDate(cd):'-'}</td><td>${r.remark||'-'}</td>`; }
       if(htDrilldownCategory==='plan' || htDrilldownCategory==='remaining') html += `<td>${r.minDepth??'-'}</td><td>${r.remark||'-'}</td>`;
       html += '</tr>';
@@ -4316,12 +4339,12 @@ function renderHoleTrackingDetail(){
   perSub.forEach(d=>{
     const pc = pillColorForRemaining(d.remainingHole);
     const cc = d.pctComplete>=80?colors.green:(d.pctComplete>=50?colors.amber:colors.red);
-    html += `<tr><td><b>${d.subpit}</b></td><td>${d.drillplan}</td><td>${d.holeFinish}</td><td>${d.cancel}</td><td>${d.meter.toLocaleString('id-ID')}</td>
-      <td><span class="pill" style="background:${pc}33;color:${pc}">${d.remainingHole}</span></td>
-      <td><span class="pill" style="background:${cc}33;color:${cc}">${d.pctComplete}%</span></td></tr>`;
+    html += `<tr><td><b>${d.subpit}</b></td><td>${d.hasPlan?d.drillplan:'-'}</td><td>${d.holeFinish}</td><td>${d.hasCancel?d.cancel:'-'}</td><td>${d.meter.toLocaleString('id-ID')}</td>
+      <td>${d.hasPlan?`<span class="pill" style="background:${pc}33;color:${pc}">${d.remainingHole}</span>`:'-'}</td>
+      <td>${d.hasPlan?`<span class="pill" style="background:${cc}33;color:${cc}">${d.pctComplete}%</span>`:'-'}</td></tr>`;
   });
   const grand = computeHoleDetailTotals(holeDetailData, '');
-  html += `<tr style="font-weight:800;background:#241f52;"><td>TOTAL KESELURUHAN</td><td>${grand.drillplan}</td><td>${grand.holeFinish}</td><td>${grand.cancel}</td><td>${grand.meter.toLocaleString('id-ID')}</td><td>${grand.remainingHole}</td><td>${grand.pctComplete}%</td></tr>`;
+  html += `<tr style="font-weight:800;background:#241f52;"><td>TOTAL KESELURUHAN</td><td>${grand.hasPlan?grand.drillplan:'-'}</td><td>${grand.holeFinish}</td><td>${grand.hasCancel?grand.cancel:'-'}</td><td>${grand.meter.toLocaleString('id-ID')}</td><td>${grand.hasPlan?grand.remainingHole:'-'}</td><td>${grand.hasPlan?grand.pctComplete+'%':'-'}</td></tr>`;
   document.getElementById('ht-table').innerHTML = html;
 
   renderHoleCancelFinishConflictPanel();
@@ -4902,7 +4925,10 @@ document.getElementById('htFileInput').addEventListener('change', e=>{
         htDrilldownCategory = null;
         htReconcileRigFilter = null;
         populateHtSubpitFilterFromDetail();
-        statusEl.textContent = `✅ "${file.name}" dimuat — ${detail.finished.length} hole finish, ${detail.plan.length} hole plan, ${detail.cancel.length} hole cancel.`;
+        const finishOnly = !detail.plan.length && !detail.sheets.cancelSheet;
+        statusEl.textContent = finishOnly
+          ? `✅ "${file.name}" dimuat — sheet "${detail.sheets.finishedSheet}", ${detail.finished.length} hole finish, total ${detail.finished.reduce((a,r)=>a+(r.depth||0),0).toLocaleString('id-ID')} m. File ini hanya berisi daftar Hole Finish (tanpa Plan/Cancel/koordinat), jadi Drill Plan, Sisa Hole, % Completion & peta hole tidak tersedia.`
+          : `✅ "${file.name}" dimuat — ${detail.finished.length} hole finish, ${detail.plan.length} hole plan, ${detail.cancel.length} hole cancel.`;
         statusEl.className = 'upload-bar status ok';
         if(activeTab==='holetrack') renderHoleTrackingDetail();
         renderOverviewHoleTrackingSummary();
