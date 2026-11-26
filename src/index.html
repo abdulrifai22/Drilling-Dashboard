@@ -3950,7 +3950,13 @@ function unifyHoleDetailSubpits(lists){
     (freq[k] ??= {})[raw] = (freq[k][raw]||0) + 1;
   }));
   const label = {};
-  Object.keys(freq).forEach(k=>{ label[k] = Object.entries(freq[k]).sort((a,b)=>b[1]-a[1])[0][0]; });
+  // Kalau ada beberapa variasi untuk sub-pit yang sama, utamakan yang memakai "_" — seragam dengan
+  // penamaan sub-pit lain & data OEE/Sample (KRENE_1, KRENE_3, KRENE_4), bukan "KRENE-4".
+  Object.keys(freq).forEach(k=>{
+    const variants = Object.entries(freq[k]).sort((a,b)=>b[1]-a[1]);
+    const underscored = variants.filter(([raw])=>raw.includes('_'));
+    label[k] = (variants.length>1 && underscored.length ? underscored : variants)[0][0];
+  });
   lists.forEach(list=>list.forEach(r=>{
     if(r.subpit===null || r.subpit===undefined || r.subpit==='') return;
     r.subpit = label[key(r.subpit)];
