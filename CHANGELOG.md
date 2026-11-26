@@ -3,6 +3,9 @@
 Semua perubahan penting pada aplikasi ini dicatat di file ini.
 Format versi mengikuti [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`.
 
+## Version 1.4.2
+- Perbaikan: sub-pit yang ditulis dengan beberapa cara di file Hole Finish (mis. "KRENE-4" dan "KRENE_4") sekarang tampil dengan satu label bergaris bawah ("KRENE_4"), seragam dengan sub-pit lain dan penamaan di data OEE/Sample.
+
 ## Version 1.4.1
 - Perbaikan: file Hole Finish BPMS lengkap (LIST HOLE FINISHED / Hole_Plan / Hole_Cancel) — penulisan sub-pit yang berbeda antar sheet (mis. "KRENE-4" vs "KRENE_4") sekarang disatukan, sehingga Hole Cancel masuk ke sub-pit yang benar dan Sisa Hole tidak terhitung kebesaran.
 - Perbaikan: Rig ID seperti "BPMS-1" / "BPMS - 05" disamakan ke format OEE ("BPMS-01" / "BPMS-05"), sehingga cross-check Hole Finish per Rig hanya menandai rig yang memang berbeda.
