@@ -3,6 +3,11 @@
 Semua perubahan penting pada aplikasi ini dicatat di file ini.
 Format versi mengikuti [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`.
 
+## Version 1.4.1
+- Perbaikan: file Hole Finish BPMS lengkap (LIST HOLE FINISHED / Hole_Plan / Hole_Cancel) — penulisan sub-pit yang berbeda antar sheet (mis. "KRENE-4" vs "KRENE_4") sekarang disatukan, sehingga Hole Cancel masuk ke sub-pit yang benar dan Sisa Hole tidak terhitung kebesaran.
+- Perbaikan: Rig ID seperti "BPMS-1" / "BPMS - 05" disamakan ke format OEE ("BPMS-01" / "BPMS-05"), sehingga cross-check Hole Finish per Rig hanya menandai rig yang memang berbeda.
+- Perbaikan: upload file Excel yang sheet-nya terdaftar sampai ~1 juta baris (padahal datanya hanya ribuan) tidak lagi membuat aplikasi tersendat beberapa detik.
+
 ## Version 1.4.0
 - Tambahan: tab Hole Track bisa menyimpan file detail hole GGM dan BPMS sekaligus. Kontraktor tiap file dikenali otomatis dari isinya (kolom kontraktor / awalan Rig ID), dengan nama file sebagai cadangan; upload ulang file kontraktor yang sama menggantikan yang lama.
 - Tambahan: data Hole Track yang tampil otomatis mengikuti Contractor di file OEE (OEE GGM → hole GGM, OEE BPMS → hole BPMS), termasuk cross-check Hole Finish per Rig dan ringkasan di Overview. Memilih kontraktor manual di Filter Kontraktor tetap dihormati sampai file OEE baru diupload.
