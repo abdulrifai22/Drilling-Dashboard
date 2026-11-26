@@ -3,6 +3,10 @@
 Semua perubahan penting pada aplikasi ini dicatat di file ini.
 Format versi mengikuti [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`.
 
+## Version 1.4.0
+- Tambahan: tab Hole Track bisa menyimpan file detail hole GGM dan BPMS sekaligus. Kontraktor tiap file dikenali otomatis dari isinya (kolom kontraktor / awalan Rig ID), dengan nama file sebagai cadangan; upload ulang file kontraktor yang sama menggantikan yang lama.
+- Tambahan: data Hole Track yang tampil otomatis mengikuti Contractor di file OEE (OEE GGM → hole GGM, OEE BPMS → hole BPMS), termasuk cross-check Hole Finish per Rig dan ringkasan di Overview. Memilih kontraktor manual di Filter Kontraktor tetap dihormati sampai file OEE baru diupload.
+
 ## Version 1.3.1
 - Tambahan: tab Hole Track bisa membaca file Hole Finish format BPMS (sheet "Tracking Hole Finish") — sebelumnya file ini salah terbaca sebagai format ringkasan "TRACKING" lama.
 - Rig ID di file Hole Finish BPMS yang ditulis angka saja ("1", "15") otomatis disamakan ke format OEE ("BPMS-01", "BPMS-15"), supaya cross-check Hole Finish per Rig tidak menandai semua hole sebagai "Rig tidak cocok". Kolom Deposit dipakai sebagai pengelompokan karena file BPMS tidak punya kolom sub-pit.
