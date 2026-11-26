@@ -1245,6 +1245,10 @@ button:focus-visible, select:focus-visible, input:focus-visible, a:focus-visible
           <input type="file" id="sampleFileInput" accept=".xlsx,.xls,.csv">
         </div>
         <div class="grp">
+          <span class="upload-bar status">🏢 Kontraktor:</span>
+          <select id="sample-contractorFilter" class="sel"><option value="">Semua Kontraktor</option></select>
+        </div>
+        <div class="grp">
           <span class="upload-bar status">📦 Filter Project:</span>
           <select id="sample-projectFilter" class="sel"><option value="">Semua Project</option></select>
         </div>
@@ -1254,14 +1258,11 @@ button:focus-visible, select:focus-visible, input:focus-visible, a:focus-visible
       <div class="panel" id="gs-config-panel" style="display:none;margin-bottom:16px;">
         <h3>SUMBER DATA GOOGLE SHEET</h3>
         <div class="field-note" style="margin-bottom:10px;">
-          Sheet harus di-share <b>“Anyone with the link — Viewer”</b> agar bisa dibaca langsung dari dashboard.
-          Tempel URL sheet-nya (link tab yang berisi data sample), lalu Simpan.
+          Setiap kontraktor punya sheet sendiri; tombol <b>🔄 Refresh Google Sheet</b> menarik semua sumber yang sudah diisi lalu menggabungkannya.
+          Sheet harus di-share <b>“Anyone with the link — Viewer”</b>. Tempel URL tab yang berisi data sample (bukan link Looker Studio — Looker Studio tidak bisa dibaca langsung,
+          ambil link Google Sheet sumbernya), lalu Simpan.
         </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-          <input type="text" id="gs-url" class="sel" style="flex:1;min-width:320px;" placeholder="https://docs.google.com/spreadsheets/d/.../edit?gid=...">
-          <button class="btn small" onclick="saveGsConfig()">💾 Simpan</button>
-          <button class="btn small secondary" onclick="resetGsConfig()">↩️ Default</button>
-        </div>
+        <div id="gs-source-list"></div>
         <div class="field-note" id="gs-config-note" style="margin-top:10px;"></div>
       </div>
 
@@ -1711,7 +1712,8 @@ function saveFilterPrefs(){
     const prev = JSON.parse(localStorage.getItem(FILTER_PREF_KEY)||'{}');
     localStorage.setItem(FILTER_PREF_KEY, JSON.stringify(Object.assign(prev, {
       ovLocationFilter, htSubpitFilter: (typeof htSubpitFilter!=='undefined'?htSubpitFilter:prev.htSubpitFilter),
-      sampleProjectFilter: (typeof sampleProjectFilter!=='undefined'?sampleProjectFilter:prev.sampleProjectFilter)
+      sampleProjectFilter: (typeof sampleProjectFilter!=='undefined'?sampleProjectFilter:prev.sampleProjectFilter),
+      sampleContractorFilter: (typeof sampleContractorFilter!=='undefined'?sampleContractorFilter:prev.sampleContractorFilter)
     })));
   }catch(e){ /* ignore (private browsing etc.) */ }
 }
@@ -2702,6 +2704,8 @@ const SAMPLE_STATUS_ICONS = {
 };
 let sampleRows = null;   // parsed rows dari Google Sheet ATAU file upload (null = belum ada data)
 let sampleProjectFilter = '';
+let sampleContractorFilter = '';
+let sampleAutoFollowMain = true; // true = filter kontraktor sample otomatis mengikuti Contractor di file OEE (GGM → sample GGM, BPMS → sample BPMS)
 let samplePage = 0;
 const SAMPLE_PAGE_SIZE = 25;
 
@@ -2777,45 +2781,74 @@ function parseSampleSheet(workbook){
    Kalau gagal (sheet privat / offline), data terakhir yang berhasil ditarik
    tetap tampil dari cache localStorage, dan upload file QC tetap tersedia.
 ===================================================================== */
-const GS_DEFAULT = {id:'1E_tQLIIWxBh3rgxVLmN2lDBpjkaEDRMSRWtfBbKomY0', gid:'1270667318'};
-const GS_CFG_KEY = 'ggm_sample_gs_cfg';
-const GS_CACHE_KEY = 'ggm_sample_gs_cache';
+// Satu entri per kontraktor. `def` = sheet default (null = belum ada, harus diisi user di panel ⚙️ Sumber).
+// `report` = link dashboard Looker Studio milik kontraktor (hanya untuk referensi/dibuka di browser —
+// Looker Studio tidak menyediakan endpoint data, jadi yang ditarik tetap Google Sheet sumbernya).
+const GS_SOURCES = [
+  {key:'GGM',  label:'GGM SAMPLE TRACKING', cfgKey:'ggm_sample_gs_cfg',
+   def:{id:'1E_tQLIIWxBh3rgxVLmN2lDBpjkaEDRMSRWtfBbKomY0', gid:'1270667318'}},
+  {key:'BPMS', label:'BPMS — WBN Sample Tracking', cfgKey:'bpms_sample_gs_cfg',
+   def:{id:'1oAMLqNrNi8NMltyCP-lUJHXRkIlaUkUT_sZOILGEF7I', gid:'0'},
+   report:'https://datastudio.google.com/u/0/reporting/75881175-cb25-4e38-a897-27723081dfb6/page/p_bl2tfvky6d'}
+];
+const GS_CACHE_KEY = 'sample_gs_cache_v2';        // {sources:{GGM:{syncedAt,cfg,rows}, BPMS:{...}}}
+const GS_LEGACY_CACHE_KEY = 'ggm_sample_gs_cache'; // cache lama (hanya GGM) — dibaca sekali untuk migrasi
 let gsLoading = false;
+let gsCbSeq = 0;
 
-function loadGsConfig(){
+function gsSource(key){ return GS_SOURCES.find(s=>s.key===key); }
+function loadGsConfig(src){
   try{
-    const raw = localStorage.getItem(GS_CFG_KEY);
+    const raw = localStorage.getItem(src.cfgKey);
     if(raw){ const c = JSON.parse(raw); if(c && c.id) return c; }
   }catch(e){}
-  return {...GS_DEFAULT};
+  return src.def ? {...src.def} : null;
 }
+function gsSheetUrl(c){ return c ? `https://docs.google.com/spreadsheets/d/${c.id}/edit?gid=${c.gid}` : ''; }
 function parseGsUrl(url){
   const id = (String(url).match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/)||[])[1];
   const gid = (String(url).match(/[#&?]gid=([0-9]+)/)||[])[1];
   return id ? {id, gid: gid || '0'} : null;
+}
+function gsNote(key, text){ const n = document.getElementById('gs-note-'+key); if(n) n.textContent = text; }
+function gsActiveText(src){
+  const c = loadGsConfig(src);
+  return c ? `Sumber aktif: sheet ${c.id.slice(0,12)}… tab gid ${c.gid}.` : '⚠️ Belum diisi — sumber ini dilewati saat Refresh.';
+}
+function renderGsSourceList(){
+  const box = document.getElementById('gs-source-list');
+  if(!box) return;
+  box.innerHTML = GS_SOURCES.map(src=>`
+    <div style="margin-bottom:14px;">
+      <div style="font-weight:600;margin-bottom:6px;">🏢 ${src.key} <span class="field-note">— ${src.label}</span>
+        ${src.report ? `<a href="${src.report}" target="_blank" rel="noopener" class="field-note" style="margin-left:8px;">🔗 Buka Looker Studio</a>` : ''}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <input type="text" id="gs-url-${src.key}" class="sel" style="flex:1;min-width:320px;" placeholder="https://docs.google.com/spreadsheets/d/.../edit?gid=..." value="${gsSheetUrl(loadGsConfig(src))}">
+        <button class="btn small" onclick="saveGsConfig('${src.key}')">💾 Simpan</button>
+        <button class="btn small secondary" onclick="resetGsConfig('${src.key}')">↩️ ${src.def ? 'Default' : 'Kosongkan'}</button>
+      </div>
+      <div class="field-note" id="gs-note-${src.key}" style="margin-top:6px;">${gsActiveText(src)}</div>
+    </div>`).join('');
 }
 function toggleGsConfig(){
   const p = document.getElementById('gs-config-panel');
   if(!p) return;
   const show = p.style.display === 'none';
   p.style.display = show ? 'block' : 'none';
-  if(show){
-    const c = loadGsConfig();
-    document.getElementById('gs-url').value = `https://docs.google.com/spreadsheets/d/${c.id}/edit?gid=${c.gid}`;
-    document.getElementById('gs-config-note').textContent = `Sumber aktif: sheet ${c.id.slice(0,12)}… tab gid ${c.gid}.`;
-  }
+  if(show){ renderGsSourceList(); document.getElementById('gs-config-note').textContent = ''; }
 }
-function saveGsConfig(){
-  const note = document.getElementById('gs-config-note');
-  const cfg = parseGsUrl(document.getElementById('gs-url').value);
-  if(!cfg){ note.textContent = '❌ URL tidak dikenali. Tempel URL lengkap Google Sheet (yang ada /spreadsheets/d/...).'; return; }
-  localStorage.setItem(GS_CFG_KEY, JSON.stringify(cfg));
-  note.textContent = `✅ Tersimpan — sheet ${cfg.id.slice(0,12)}… tab gid ${cfg.gid}. Klik 🔄 Refresh Google Sheet untuk menarik data.`;
+function saveGsConfig(key){
+  const src = gsSource(key);
+  const cfg = parseGsUrl(document.getElementById('gs-url-'+key).value);
+  if(!cfg){ gsNote(key, '❌ URL tidak dikenali. Tempel URL lengkap Google Sheet (yang ada /spreadsheets/d/...). Link Looker Studio tidak bisa dipakai.'); return; }
+  localStorage.setItem(src.cfgKey, JSON.stringify(cfg));
+  gsNote(key, `✅ Tersimpan — sheet ${cfg.id.slice(0,12)}… tab gid ${cfg.gid}. Klik 🔄 Refresh Google Sheet untuk menarik data.`);
 }
-function resetGsConfig(){
-  localStorage.removeItem(GS_CFG_KEY);
-  document.getElementById('gs-url').value = `https://docs.google.com/spreadsheets/d/${GS_DEFAULT.id}/edit?gid=${GS_DEFAULT.gid}`;
-  document.getElementById('gs-config-note').textContent = '↩️ Kembali ke sheet default (GGM SAMPLE TRACKING).';
+function resetGsConfig(key){
+  const src = gsSource(key);
+  localStorage.removeItem(src.cfgKey);
+  document.getElementById('gs-url-'+key).value = gsSheetUrl(src.def);
+  gsNote(key, src.def ? `↩️ Kembali ke sheet default (${src.label}).` : '↩️ Dikosongkan — sumber ini dilewati saat Refresh.');
 }
 
 // gviz mengirim tanggal sebagai string "Date(2026,8,6)" (bulan 0-based) — bukan Date asli.
@@ -2843,7 +2876,8 @@ function gvizTableToSampleRows(table){
 }
 
 function fetchGoogleSheet(cfg, onOk, onErr){
-  const cbName = '__gvizCb_' + Date.now();
+  // Nama callback harus unik per panggilan — beberapa sumber ditarik bersamaan (Date.now() saja bisa bentrok).
+  const cbName = '__gvizCb_' + Date.now() + '_' + (++gsCbSeq);
   const url = `https://docs.google.com/spreadsheets/d/${cfg.id}/gviz/tq`
             + `?tqx=out:json;responseHandler:${cbName}&gid=${encodeURIComponent(cfg.gid)}&headers=1&_=${Date.now()}`;
   const script = document.createElement('script');
@@ -2872,6 +2906,7 @@ function applySampleRows(rows, sourceLabel, syncedAt){
   sampleRows = rows;
   sampleProjectFilter = '';
   samplePage = 0;
+  populateSampleContractorFilter();
   populateSampleProjectFilter();
   renderSampleSummary();
   renderSampleTable();
@@ -2879,40 +2914,105 @@ function applySampleRows(rows, sourceLabel, syncedAt){
   renderSampleDrilldownPanel();
   const el = document.getElementById('sampleStatusText');
   if(el){
-    const dpo = new Set(rows.map(r=>r.dpo).filter(d=>d&&d!=='-')).size;
+    const dpo = new Set(rows.filter(r=>r.dpo&&r.dpo!=='-').map(sampleDpoKey)).size;
     const jam = syncedAt ? new Date(syncedAt).toLocaleString('id-ID') : '-';
     el.textContent = `✅ ${sourceLabel} — ${rows.length} hole, ${dpo} DPO, ${new Set(rows.map(r=>r.project)).size} project. Sinkron terakhir: ${jam}.`;
     el.className = 'upload-bar status ok';
   }
 }
 
+function loadGsCache(){
+  try{
+    const raw = localStorage.getItem(GS_CACHE_KEY);
+    if(raw){ const c = JSON.parse(raw); if(c && c.sources) return c; }
+    // Migrasi dari cache lama (versi yang hanya punya sumber GGM).
+    const old = localStorage.getItem(GS_LEGACY_CACHE_KEY);
+    if(old){
+      const o = JSON.parse(old);
+      if(o && Array.isArray(o.rows)){
+        o.rows.forEach(r=>{ r.contractor = 'GGM'; });
+        return {sources:{GGM:{syncedAt:o.syncedAt, cfg:o.cfg, rows:o.rows}}};
+      }
+    }
+  }catch(e){}
+  return {sources:{}};
+}
+function saveGsCache(cache){
+  try{ localStorage.setItem(GS_CACHE_KEY, JSON.stringify(cache)); localStorage.removeItem(GS_LEGACY_CACHE_KEY); }catch(e){}
+}
+// Gabungkan baris semua sumber yang tersimpan di cache (urutan sesuai GS_SOURCES).
+function mergeGsCacheRows(cache){
+  const rows = [];
+  let syncedAt = 0;
+  const keys = [];
+  GS_SOURCES.forEach(src=>{
+    const c = cache.sources[src.key];
+    if(!c || !Array.isArray(c.rows) || !c.rows.length) return;
+    c.rows.forEach(r=>{ rows.push({...r, updateDate: r.updateDate ? new Date(r.updateDate) : null}); });
+    syncedAt = Math.max(syncedAt, c.syncedAt||0);
+    keys.push(src.key);
+  });
+  return {rows, syncedAt, keys};
+}
+
 function refreshSampleFromGoogleSheet(){
   if(gsLoading) return;
-  const cfg = loadGsConfig();
   const el = document.getElementById('sampleStatusText');
   const btn = document.getElementById('gsRefreshBtn');
+  const targets = GS_SOURCES.map(src=>({src, cfg: loadGsConfig(src)})).filter(t=>t.cfg);
+  if(!targets.length){
+    if(el){ el.textContent = '❌ Belum ada sumber Google Sheet yang diisi — buka ⚙️ Sumber.'; el.className = 'upload-bar status err'; }
+    return;
+  }
   gsLoading = true;
   if(btn){ btn.disabled = true; btn.textContent = '⏳ Menarik data...'; }
-  if(el){ el.textContent = '⏳ Menarik data terbaru dari Google Sheet...'; el.className = 'upload-bar status'; }
+  if(el){ el.textContent = `⏳ Menarik data terbaru dari Google Sheet (${targets.map(t=>t.src.key).join(', ')})...`; el.className = 'upload-bar status'; }
 
-  const finish = ()=>{ gsLoading = false; if(btn){ btn.disabled = false; btn.textContent = '🔄 Refresh Google Sheet'; } };
-
-  fetchGoogleSheet(cfg, table=>{
-    finish();
-    let rows;
-    try{ rows = gvizTableToSampleRows(table); }
-    catch(err){ if(el){ el.textContent = '❌ Data terbaca tapi gagal diolah: '+err.message; el.className='upload-bar status err'; } return; }
-    if(!rows.length){
-      if(el){ el.textContent = '❌ Sheet terbaca tapi tidak ada baris sample valid. Pastikan tab yang dipilih punya kolom "Hole Id" dan "Sample status".'; el.className='upload-bar status err'; }
+  const cache = loadGsCache();
+  const results = {};   // key -> {ok:true, n} | {ok:false, msg}
+  let pending = targets.length;
+  const oneDone = ()=>{
+    if(--pending > 0) return;
+    gsLoading = false;
+    if(btn){ btn.disabled = false; btn.textContent = '🔄 Refresh Google Sheet'; }
+    saveGsCache(cache);
+    const merged = mergeGsCacheRows(cache);
+    const failed = targets.filter(t=>!results[t.src.key].ok);
+    const failText = failed.map(t=>`${t.src.key}: ${results[t.src.key].msg}`).join(' | ');
+    if(!merged.rows.length){
+      if(el){ el.textContent = '❌ ' + (failText || 'Tidak ada data sample valid.') + ' — sementara bisa pakai tombol Upload File QC.'; el.className = 'upload-bar status err'; }
       return;
     }
-    const syncedAt = Date.now();
-    try{ localStorage.setItem(GS_CACHE_KEY, JSON.stringify({syncedAt, cfg, rows})); }catch(e){}
-    applySampleRows(rows, 'Google Sheet', syncedAt);
-    logUpload('Sample (Google Sheet)', `gid ${cfg.gid}`, rows.length);
-  }, msg=>{
-    finish();
-    if(el){ el.textContent = '❌ '+msg+' — sementara bisa pakai tombol Upload File QC.'; el.className = 'upload-bar status err'; }
+    const label = 'Google Sheet ' + targets.map(t=>{
+      const r = results[t.src.key];
+      return r.ok ? `${t.src.key} ✓` : (merged.keys.includes(t.src.key) ? `${t.src.key} (cache)` : `${t.src.key} ✗`);
+    }).join(', ');
+    applySampleRows(merged.rows, label, merged.syncedAt);
+    if(failed.length && el){
+      el.textContent += ' ⚠️ Gagal: ' + failText;
+      el.className = 'upload-bar status err';
+    }
+  };
+
+  targets.forEach(({src, cfg})=>{
+    fetchGoogleSheet(cfg, table=>{
+      let rows;
+      try{ rows = gvizTableToSampleRows(table); }
+      catch(err){ results[src.key] = {ok:false, msg:'data terbaca tapi gagal diolah: '+err.message}; return oneDone(); }
+      if(!rows.length){
+        results[src.key] = {ok:false, msg:'tidak ada baris sample valid (butuh kolom "Hole Id" & "Sample status")'};
+        return oneDone();
+      }
+      // Sumber Google Sheet per kontraktor → kontraktor ditentukan oleh sumbernya.
+      rows.forEach(r=>{ r.contractor = src.key; });
+      cache.sources[src.key] = {syncedAt: Date.now(), cfg, rows};
+      results[src.key] = {ok:true, n:rows.length};
+      logUpload(`Sample (Google Sheet ${src.key})`, `gid ${cfg.gid}`, rows.length);
+      oneDone();
+    }, msg=>{
+      results[src.key] = {ok:false, msg};
+      oneDone();
+    });
   });
 }
 
@@ -2920,26 +3020,29 @@ function refreshSampleFromGoogleSheet(){
 // supaya angka tidak kosong sebelum user sempat menekan Refresh / saat offline.
 function restoreSampleCache(){
   try{
-    const raw = localStorage.getItem(GS_CACHE_KEY);
-    if(!raw) return false;
-    const c = JSON.parse(raw);
-    if(!c || !Array.isArray(c.rows) || !c.rows.length) return false;
-    c.rows.forEach(r=>{ r.updateDate = r.updateDate ? new Date(r.updateDate) : null; });
-    applySampleRows(c.rows, 'Google Sheet (cache lokal)', c.syncedAt);
+    const merged = mergeGsCacheRows(loadGsCache());
+    if(!merged.rows.length) return false;
+    applySampleRows(merged.rows, `Google Sheet ${merged.keys.join(' + ')} (cache lokal)`, merged.syncedAt);
     return true;
   }catch(e){ return false; }
 }
 
-function getFilteredSampleRows(){
+// DPO bisa saja bernomor sama antar kontraktor → hitung unik per kontraktor+DPO.
+function sampleDpoKey(r){ return (r.contractor||'') + '|' + r.dpo; }
+function getContractorSampleRows(){
   if(!sampleRows) return [];
-  return sampleProjectFilter ? sampleRows.filter(r=>r.project===sampleProjectFilter) : sampleRows;
+  return sampleContractorFilter ? sampleRows.filter(r=>r.contractor===sampleContractorFilter) : sampleRows;
+}
+function getFilteredSampleRows(){
+  const rows = getContractorSampleRows();
+  return sampleProjectFilter ? rows.filter(r=>r.project===sampleProjectFilter) : rows;
 }
 
 function sampleStatusCounts(rowsArr){
   // Counted by unique DPO (not per hole): shows how many DPOs remain at each stage.
   const dpoSets = {};
   SAMPLE_STATUSES.forEach(s=>dpoSets[s]=new Set());
-  rowsArr.forEach(r=>{ if(dpoSets[r.status]!==undefined && r.dpo && r.dpo!=='-') dpoSets[r.status].add(r.dpo); });
+  rowsArr.forEach(r=>{ if(dpoSets[r.status]!==undefined && r.dpo && r.dpo!=='-') dpoSets[r.status].add(sampleDpoKey(r)); });
   const counts = {};
   SAMPLE_STATUSES.forEach(s=>counts[s]=dpoSets[s].size);
   return counts;
@@ -2965,8 +3068,9 @@ function computeSampleDrilldown(status){
   const rows = getFilteredSampleRows().filter(r=>r.status===status);
   const byDpo = {};
   rows.forEach(r=>{
-    if(!byDpo[r.dpo]) byDpo[r.dpo] = {dpo:r.dpo, project:r.project, holeIds:[], totalBag:0, totalSample:0, lastDate:null};
-    const g = byDpo[r.dpo];
+    const k = sampleDpoKey(r);
+    if(!byDpo[k]) byDpo[k] = {dpo:r.dpo, contractor:r.contractor||'-', project:r.project, holeIds:[], totalBag:0, totalSample:0, lastDate:null};
+    const g = byDpo[k];
     g.holeIds.push(r.holeId);
     g.totalBag += (r.totalBag||0);
     g.totalSample += (r.totalSample||0);
@@ -2999,13 +3103,13 @@ function renderSampleDrilldownPanel(){
       </div>
     </div>`;
   html += `<div id="sample-drilldown-capture">
-    <h3 style="margin:0 0 10px;color:${color};">📋 Detail DPO — ${sampleDrilldownStatus} <span>(${groups.length} DPO${sampleProjectFilter?' — '+sampleProjectFilter:''})</span></h3>
-    <div class="table-wrap" style="max-height:360px;"><table id="sample-drilldown-table"><tr><th>No.</th><th>DPO</th><th>Project</th><th>Jumlah Hole</th><th>Hole ID</th><th>Total Bag</th><th>Total Sample</th><th>Update Terakhir</th></tr>`;
+    <h3 style="margin:0 0 10px;color:${color};">📋 Detail DPO — ${sampleDrilldownStatus} <span>(${groups.length} DPO${sampleContractorFilter?' — '+sampleContractorFilter:''}${sampleProjectFilter?' — '+sampleProjectFilter:''})</span></h3>
+    <div class="table-wrap" style="max-height:360px;"><table id="sample-drilldown-table"><tr><th>No.</th><th>DPO</th><th>Kontraktor</th><th>Project</th><th>Jumlah Hole</th><th>Hole ID</th><th>Total Bag</th><th>Total Sample</th><th>Update Terakhir</th></tr>`;
   if(!groups.length){
-    html += '<tr><td colspan="8">Tidak ada DPO dengan status ini.</td></tr>';
+    html += '<tr><td colspan="9">Tidak ada DPO dengan status ini.</td></tr>';
   } else {
     groups.forEach((g,i)=>{
-      html += `<tr><td>${i+1}</td><td><b>${g.dpo}</b></td><td>${g.project}</td><td>${g.holeIds.length}</td><td style="max-width:260px;">${g.holeIds.join(', ')}</td><td>${g.totalBag}</td><td>${g.totalSample}</td><td>${g.lastDate?fmtDate(g.lastDate):'-'}</td></tr>`;
+      html += `<tr><td>${i+1}</td><td><b>${g.dpo}</b></td><td>${g.contractor}</td><td>${g.project}</td><td>${g.holeIds.length}</td><td style="max-width:260px;">${g.holeIds.join(', ')}</td><td>${g.totalBag}</td><td>${g.totalSample}</td><td>${g.lastDate?fmtDate(g.lastDate):'-'}</td></tr>`;
     });
   }
   html += '</table></div></div>';
@@ -3047,6 +3151,7 @@ function exportSampleDrilldownExcel(){
   const rows = groups.map((g,i)=>({
     'No.': i+1,
     'DPO': g.dpo,
+    'Kontraktor': g.contractor,
     'Project': g.project,
     'Jumlah Hole': g.holeIds.length,
     'Hole ID': g.holeIds.join(', '),
@@ -3055,7 +3160,7 @@ function exportSampleDrilldownExcel(){
     'Update Terakhir': g.lastDate ? fmtDate(g.lastDate) : '-'
   }));
   const ws = XLSX.utils.json_to_sheet(rows.length ? rows : [{'DPO':'Tidak ada data'}]);
-  ws['!cols'] = [{wch:6},{wch:12},{wch:10},{wch:12},{wch:40},{wch:10},{wch:12},{wch:16}];
+  ws['!cols'] = [{wch:6},{wch:12},{wch:11},{wch:10},{wch:12},{wch:40},{wch:10},{wch:12},{wch:16}];
   const wb = XLSX.utils.book_new();
   const sheetName = sampleDrilldownStatus.slice(0,31);
   XLSX.utils.book_append_sheet(wb, ws, sheetName);
@@ -3076,10 +3181,10 @@ function renderSampleTable(){
   samplePage = Math.min(samplePage, totalPages-1);
   const pageRows = rows.slice(samplePage*SAMPLE_PAGE_SIZE, (samplePage+1)*SAMPLE_PAGE_SIZE);
 
-  let html = '<tr><th>Update Date</th><th>DPO</th><th>Project</th><th>Hole ID</th><th>Sample Status</th><th>Total Bag</th><th>Total Sample</th></tr>';
+  let html = '<tr><th>Update Date</th><th>DPO</th><th>Kontraktor</th><th>Project</th><th>Hole ID</th><th>Sample Status</th><th>Total Bag</th><th>Total Sample</th></tr>';
   pageRows.forEach(r=>{
     const c = SAMPLE_STATUS_COLORS[r.status] || colors.muted;
-    html += `<tr><td>${r.updateDate?fmtDate(r.updateDate):'-'}</td><td>${r.dpo}</td><td>${r.project}</td><td>${r.holeId}</td>
+    html += `<tr><td>${r.updateDate?fmtDate(r.updateDate):'-'}</td><td>${r.dpo}</td><td>${r.contractor||'-'}</td><td>${r.project}</td><td>${r.holeId}</td>
       <td><span class="pill" style="background:${c}33;color:${c}">${r.status}</span></td><td>${r.totalBag}</td><td>${r.totalSample}</td></tr>`;
   });
   tableEl.innerHTML = html;
@@ -3088,11 +3193,45 @@ function renderSampleTable(){
 
 function populateSampleProjectFilter(){
   const sel = document.getElementById('sample-projectFilter');
-  const projects = Array.from(new Set((sampleRows||[]).map(r=>r.project).filter(Boolean))).sort();
+  const projects = Array.from(new Set(getContractorSampleRows().map(r=>r.project).filter(Boolean))).sort();
   const current = sampleProjectFilter || loadFilterPrefs().sampleProjectFilter;
   sel.innerHTML = '<option value="">Semua Project</option>' + projects.map(p=>`<option value="${p}">${p}</option>`).join('');
   sel.value = projects.includes(current) ? current : '';
   sampleProjectFilter = sel.value;
+}
+
+// Kontraktor sample yang cocok dengan Contractor file OEE aktif. '' = tampilkan semua
+// (data demo, file OEE berisi campuran kontraktor, atau kontraktornya tidak punya data sample).
+function mainSampleContractor(){
+  if(usingDemo || !currentDATA || !currentDATA.contractor) return '';
+  const main = String(currentDATA.contractor).trim().toUpperCase();
+  return Array.from(new Set((sampleRows||[]).map(r=>r.contractor).filter(Boolean)))
+    .find(c=>String(c).trim().toUpperCase()===main) || '';
+}
+// Dipanggil setiap data OEE berganti (upload / ganti tanggal / reset demo).
+function syncSampleContractorWithMain(){
+  if(!sampleAutoFollowMain || !sampleRows || !sampleRows.length) return;
+  const next = mainSampleContractor();
+  if(next === sampleContractorFilter) return;
+  sampleContractorFilter = next;
+  const sel = document.getElementById('sample-contractorFilter');
+  if(sel) sel.value = next;
+  sampleProjectFilter = '';
+  populateSampleProjectFilter();
+  samplePage = 0;
+  renderSampleSummary();
+  renderSampleTable();
+  renderOverviewSampleSummary();
+  renderSampleDrilldownPanel();
+}
+function populateSampleContractorFilter(){
+  const sel = document.getElementById('sample-contractorFilter');
+  if(!sel) return;
+  const list = Array.from(new Set((sampleRows||[]).map(r=>r.contractor).filter(Boolean))).sort();
+  const current = sampleAutoFollowMain ? mainSampleContractor() : (sampleContractorFilter || loadFilterPrefs().sampleContractorFilter);
+  sel.innerHTML = '<option value="">Semua Kontraktor</option>' + list.map(c=>`<option value="${c}">${c}</option>`).join('');
+  sel.value = list.includes(current) ? current : '';
+  sampleContractorFilter = sel.value;
 }
 
 // Overview panel: replaces the old Hole Summary with Sample Summary
@@ -3111,7 +3250,8 @@ function renderOverviewSampleSummary(){
   setVal('ss-wbn','Sent to WBN');
   noteEl.style.display = counts ? 'none' : 'block';
   const subEl = document.getElementById('ov-ht-subtitle-sample');
-  if(subEl) subEl.textContent = sampleProjectFilter ? `(jumlah DPO — project: ${sampleProjectFilter})` : (sampleRows&&sampleRows.length ? '(jumlah DPO — semua project)' : '(jumlah DPO)');
+  const ctr = sampleContractorFilter ? ` — ${sampleContractorFilter}${sampleAutoFollowMain?' (ikut data OEE)':''}` : '';
+  if(subEl) subEl.textContent = sampleProjectFilter ? `(jumlah DPO${ctr} — project: ${sampleProjectFilter})` : (sampleRows&&sampleRows.length ? `(jumlah DPO${ctr} — semua project)` : '(jumlah DPO)');
 }
 
 document.getElementById('sampleFileInput').addEventListener('change', e=>{
@@ -3133,6 +3273,7 @@ document.getElementById('sampleFileInput').addEventListener('change', e=>{
       sampleRows = parsed.rows;
       sampleProjectFilter = '';
       samplePage = 0;
+      populateSampleContractorFilter();
       populateSampleProjectFilter();
       statusEl.textContent = `✅ "${file.name}" dimuat — sheet "${parsed.sheetName}", ${sampleRows.length} hole, ${new Set(sampleRows.map(r=>r.project)).size} project.`;
       statusEl.className = 'upload-bar status ok';
@@ -3152,6 +3293,18 @@ document.getElementById('sampleFileInput').addEventListener('change', e=>{
 });
 document.getElementById('sample-projectFilter').addEventListener('change', e=>{
   sampleProjectFilter = e.target.value;
+  saveFilterPrefs();
+  samplePage = 0;
+  renderSampleSummary();
+  renderSampleTable();
+  renderOverviewSampleSummary();
+  renderSampleDrilldownPanel();
+});
+document.getElementById('sample-contractorFilter').addEventListener('change', e=>{
+  sampleContractorFilter = e.target.value;
+  sampleAutoFollowMain = false;    // user memilih manual → berhenti mengikuti file OEE sampai file OEE baru diupload
+  sampleProjectFilter = '';
+  populateSampleProjectFilter();   // daftar project mengikuti kontraktor terpilih
   saveFilterPrefs();
   samplePage = 0;
   renderSampleSummary();
@@ -5185,6 +5338,7 @@ function processWorkbook(workbook, filename){
 
   ovLocationFilter = '';
   populateLocationFilter();
+  sampleAutoFollowMain = true;   // file OEE baru → data sample kembali mengikuti kontraktornya
   logUpload('OEE Drilling', filename, rows.length);
 
   renderFromSelectedDate();
@@ -5227,6 +5381,7 @@ function renderFromSelectedDate(){
   currentDATA = buildDataForDate(allRows, reportDate);
   renderTopbar(currentDATA);
   syncHtContractorWithMain(currentDATA);
+  syncSampleContractorWithMain();
   RENDERERS[activeTab](currentDATA);
   updateSidebarBadges();
 }
@@ -5294,6 +5449,8 @@ document.getElementById('st-resetDemo').addEventListener('click', ()=>{
   setStatus('', false);
   currentDATA = DEMO_DATA;
   renderTopbar(currentDATA);
+  sampleAutoFollowMain = true;
+  syncSampleContractorWithMain();
   RENDERERS[activeTab](currentDATA);
 });
 

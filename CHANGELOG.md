@@ -3,6 +3,12 @@
 Semua perubahan penting pada aplikasi ini dicatat di file ini.
 Format versi mengikuti [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`.
 
+## Version 1.3.0
+- Tambahan: sumber data sample BPMS (Google Sheet "WBN Sample Tracking") di tab Sample — tombol 🔄 Refresh Google Sheet sekarang menarik data GGM dan BPMS sekaligus lalu menggabungkannya. Panel ⚙️ Sumber berisi satu baris per kontraktor (plus link ke Looker Studio BPMS).
+- Tambahan: filter Kontraktor di tab Sample, dan kolom Kontraktor di tabel Detail Sample Tracking, drilldown DPO, serta export Excel-nya.
+- Tambahan: data sample otomatis mengikuti Contractor di file OEE yang diupload (OEE GGM → sample GGM, OEE BPMS → sample BPMS); memilih filter manual tetap dihormati sampai file OEE baru diupload.
+- Perbaikan: DPO dihitung unik per kontraktor, jadi nomor DPO yang sama di GGM & BPMS tidak tergabung. Kalau salah satu sheet gagal ditarik, data terakhirnya dari cache tetap tampil.
+
 ## Version 1.2.1
 - Perbaikan: Rig Position sekarang menggabungkan sheet snapshot ("POSITION") dengan sheet log bertanggal per-kontraktor (mis. "GGM") — data bertanggal yang usianya maksimal 7 hari dari tanggal terbaru akan menggantikan posisi di snapshot untuk Rig yang sama; Rig dengan data lebih dari 7 hari otomatis disembunyikan dari peta dan dilaporkan di pesan status.
 
