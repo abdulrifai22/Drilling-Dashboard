@@ -3,6 +3,11 @@
 Semua perubahan penting pada aplikasi ini dicatat di file ini.
 Format versi mengikuti [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`.
 
+## Version 1.5.0
+- Tambahan: file Tracking Hole Finish harian sekarang menambal file Hole Finish lengkap (LIST HOLE FINISHED + Hole_Plan + Hole_Cancel) yang hanya dikirim BPMS tiap Rabu & Jumat — hole yang belum tercatat di file lengkap ditambahkan sebagai Finish, lengkap dengan sub-pit & koordinat dari Hole_Plan. Upload file lengkap berikutnya otomatis menjadi data dasar baru.
+- Tambahan: file Hole Finish yang diupload disimpan di aplikasi dan dimuat lagi saat aplikasi dibuka, jadi file lengkap hari Rabu/Jumat tetap ada di hari lain. Tombol "Hapus Data Tersimpan" untuk menghapusnya.
+- Tambahan: panel "Hole Finish Harian" di tab Hole Track — jumlah hole, meter & rig per hari untuk 7 hari terakhir, termasuk berapa yang berasal dari file Tracking. Hole dari Tracking juga ditandai "(tracking)" di detail Hole Finish.
+
 ## Version 1.4.2
 - Perbaikan: sub-pit yang ditulis dengan beberapa cara di file Hole Finish (mis. "KRENE-4" dan "KRENE_4") sekarang tampil dengan satu label bergaris bawah ("KRENE_4"), seragam dengan sub-pit lain dan penamaan di data OEE/Sample.
 
