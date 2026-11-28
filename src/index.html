@@ -1290,6 +1290,7 @@ button:focus-visible, select:focus-visible, input:focus-visible, a:focus-visible
         <div class="grp">
           <label class="btn" for="htFileInput">📂 Upload File Holes Finished (.xlsx)</label>
           <input type="file" id="htFileInput" accept=".xlsx,.xls,.csv">
+          <button class="btn small secondary" id="htClearStoredBtn" style="display:none;" onclick="clearStoredHoleDetail()" title="Hapus file Hole Finish yang tersimpan di aplikasi">🗑️ Hapus Data Tersimpan</button>
         </div>
         <div class="grp">
           <span class="upload-bar status">🏗️ Filter Kontraktor:</span>
@@ -1303,6 +1304,8 @@ button:focus-visible, select:focus-visible, input:focus-visible, a:focus-visible
       </div>
 
       <div class="kpi-row" id="htSummaryRow" style="grid-template-columns:repeat(6,1fr);"></div>
+
+      <div class="panel" id="ht-daily-panel" style="display:none;margin:16px 0;"></div>
 
       <div class="panel" id="ht-conflict-panel" style="display:none;margin-bottom:16px;border-left:3px solid var(--red);"></div>
 
@@ -3803,6 +3806,7 @@ function renderHoleTrackingFallback(rows, reportDate){
 }
 
 function renderHoleTracking(DATA, rows, reportDate){
+  if(!holeDetailData) renderHoleDailyPanel(); // sembunyikan panel harian di mode non-detail
   if(holeDetailData){
     renderHoleTrackingDetail();
   } else if(htRows && htRows.length){
@@ -3851,6 +3855,13 @@ let holeDetailData = null; // {finished, plan, cancel, redrill} or null — file
 // Yang ditampilkan (holeDetailData) otomatis mengikuti Contractor file OEE — sama seperti tab Sample.
 let holeDetailByContractor = {};
 let holeDetailContractor = ''; // kunci holeDetailByContractor yang sedang tampil
+// Sumber mentah per kontraktor: {base:{detail,fileName,uploadedAt}, tracking:{detail,fileName,uploadedAt}}.
+//   base     = file lengkap (LIST HOLE FINISHED + Hole_Plan + Hole_Cancel) — BPMS hanya mengirim ini Rabu & Jumat.
+//   tracking = file yang hanya berisi daftar Hole Finish (sheet "Tracking Hole Finish") — diupload tiap hari
+//              untuk menambal hole yang finish SETELAH file lengkap terakhir.
+// holeDetailByContractor[c] = hasil gabungan keduanya (buildEffectiveHoleDetail). Disimpan permanen di
+// IndexedDB supaya file lengkap hari Rabu/Jumat tetap ada saat aplikasi dibuka lagi di hari lain.
+let holeDetailStore = {};
 let htDrilldownCategory = null; // 'plan' | 'finish' | 'cancel' | null
 let htReconcileRigFilter = null; // Rig ID selected in the Hole Finish per-Rig reconciliation table, or null for all
 let rigPositionData = null; // {points:[{rigId,x,y,note,date,remark,subpit}], sourceLabel} or null = not uploaded yet
@@ -3984,6 +3995,149 @@ function mainHoleDetailContractor(){
   if(usingDemo || !currentDATA || !currentDATA.contractor) return '';
   const main = String(currentDATA.contractor).trim().toUpperCase();
   return holeDetailByContractor[main] ? main : '';
+}
+
+function isFinishOnlyDetail(d){ return !d.plan.length && !(d.sheets && d.sheets.cancelSheet); }
+function maxHoleFinishDate(rows){
+  let max = null;
+  rows.forEach(r=>{ const d = toDateOnly(r.finishDate); if(d && (!max || d>max)) max = d; });
+  return max;
+}
+
+// File lengkap + hole dari Tracking harian yang belum tercatat di file lengkap itu. Sub-pit & koordinat
+// hole tambahan diambil dari Hole_Plan (file Tracking tidak punya kolom sub-pit/X/Y).
+function buildEffectiveHoleDetail(entry){
+  const base = entry.base && entry.base.detail;
+  const tr = entry.tracking && entry.tracking.detail;
+  if(!base && !tr) return null;
+  if(!base) return Object.assign({}, tr, {merge:{trackingOnly:true, trackingFile:entry.tracking.fileName, trackingDate:maxHoleFinishDate(tr.finished)}});
+  const merge = {baseFile:entry.base.fileName, baseDate:maxHoleFinishDate(base.finished), added:0, addedNoPlan:0};
+  if(!tr) return Object.assign({}, base, {merge});
+  const have = new Set(base.finished.map(r=>r.holeId));
+  const planById = {};
+  base.plan.forEach(r=>{ if(r.holeId) planById[r.holeId] = r; });
+  const added = tr.finished.filter(r=>r.holeId && !have.has(r.holeId)).map(r=>{
+    const pl = planById[r.holeId];
+    if(!pl) merge.addedNoPlan++;
+    return Object.assign({}, r, pl ? {subpit:pl.subpit, x:pl.x, y:pl.y, z:pl.z} : {}, {fromTracking:true});
+  });
+  merge.added = added.length;
+  merge.trackingFile = entry.tracking.fileName;
+  merge.trackingDate = maxHoleFinishDate(tr.finished);
+  return Object.assign({}, base, {finished: base.finished.concat(added), merge});
+}
+function rebuildHoleDetailByContractor(){
+  holeDetailByContractor = {};
+  Object.keys(holeDetailStore).forEach(c=>{
+    const eff = buildEffectiveHoleDetail(holeDetailStore[c]);
+    if(eff) holeDetailByContractor[c] = eff;
+  });
+  const btn = document.getElementById('htClearStoredBtn');
+  if(btn) btn.style.display = Object.keys(holeDetailByContractor).length ? '' : 'none';
+}
+// Ringkasan sumber untuk teks status/keterangan, mis. "file lengkap s/d 26 Nov 2026 + 10 hole dari Tracking (s/d 28 Nov 2026)".
+function describeHoleDetailSource(d){
+  const m = d && d.merge;
+  if(!m) return '';
+  if(m.trackingOnly) return `hanya file Tracking (s/d ${m.trackingDate?fmtDate(m.trackingDate):'-'}) — belum ada file lengkap Rabu/Jumat`;
+  let t = `file lengkap s/d ${m.baseDate?fmtDate(m.baseDate):'-'}`;
+  if(m.trackingFile) t += m.added ? ` + ${m.added} hole dari Tracking harian (s/d ${m.trackingDate?fmtDate(m.trackingDate):'-'})` : ' (Tracking harian tidak menambah hole baru)';
+  return t;
+}
+
+const HT_DB_NAME = 'drilling_dashboard', HT_DB_STORE = 'kv', HT_DB_KEY = 'hole_detail_store_v1';
+function htDbOpen(){
+  return new Promise((resolve, reject)=>{
+    if(typeof indexedDB==='undefined') return reject(new Error('IndexedDB tidak tersedia'));
+    const rq = indexedDB.open(HT_DB_NAME, 1);
+    rq.onupgradeneeded = ()=>{ rq.result.createObjectStore(HT_DB_STORE); };
+    rq.onsuccess = ()=>resolve(rq.result);
+    rq.onerror = ()=>reject(rq.error);
+  });
+}
+function htDbRun(mode, fn){
+  return htDbOpen().then(db=>new Promise((resolve, reject)=>{
+    const tx = db.transaction(HT_DB_STORE, mode);
+    const rq = fn(tx.objectStore(HT_DB_STORE));
+    tx.oncomplete = ()=>{ db.close(); resolve(rq && rq.result); };
+    tx.onerror = ()=>{ db.close(); reject(tx.error); };
+  }));
+}
+function saveHoleDetailStore(){
+  return htDbRun('readwrite', st=>st.put(holeDetailStore, HT_DB_KEY)).catch(err=>console.warn('Gagal menyimpan data Hole Track:', err));
+}
+// Saat aplikasi dibuka: muat lagi file Hole Finish yang tersimpan (kalau ada).
+function restoreHoleDetailStore(){
+  return htDbRun('readonly', st=>st.get(HT_DB_KEY)).then(saved=>{
+    if(!saved || typeof saved!=='object' || !Object.keys(saved).length) return;
+    if(holeDetailData || (htRows && htRows.length)) return; // user sudah upload sesuatu duluan
+    holeDetailStore = saved;
+    rebuildHoleDetailByContractor();
+    const keys = Object.keys(holeDetailByContractor).sort();
+    if(!keys.length) return;
+    htRows = null;
+    selectHoleDetailContractor(mainHoleDetailContractor() || keys[0]);
+    const el = document.getElementById('htStatusText');
+    if(el){
+      el.textContent = '📦 Data Hole Finish tersimpan dimuat — ' + keys.map(c=>`${c}: ${describeHoleDetailSource(holeDetailByContractor[c])}`).join(' · ') + '.';
+      el.className = 'upload-bar status ok';
+    }
+    renderHoleDetailViews();
+  }).catch(err=>console.warn('Gagal memuat data Hole Track tersimpan:', err));
+}
+function clearStoredHoleDetail(){
+  if(!confirm('Hapus semua file Hole Finish yang tersimpan (semua kontraktor)? Kamu perlu upload ulang file lengkap & Tracking-nya.')) return;
+  holeDetailStore = {};
+  holeDetailByContractor = {};
+  holeDetailContractor = '';
+  holeDetailData = null;
+  htDrilldownCategory = null;
+  htReconcileRigFilter = null;
+  htSubpitFilter = '';
+  rebuildHoleDetailByContractor();
+  htDbRun('readwrite', st=>st.delete(HT_DB_KEY)).catch(()=>{});
+  const el = document.getElementById('htStatusText');
+  if(el){ el.textContent = '🗑️ Data Hole Finish tersimpan sudah dihapus.'; el.className = 'upload-bar status'; }
+  const sel = document.getElementById('ht-contractorFilter');
+  if(sel) sel.innerHTML = '<option value="">Semua Kontraktor</option>';
+  renderHoleTracking(currentDATA, allRows, currentDATA && currentDATA.report_date_obj);
+  updateSidebarBadges();
+}
+
+// Hole Finish per hari (7 hari kalender terakhir s/d tanggal finish terbaru) — supaya jumlah hole
+// yang finish tiap hari tetap terlihat walau file lengkap BPMS hanya datang Rabu & Jumat.
+function renderHoleDailyPanel(){
+  const panel = document.getElementById('ht-daily-panel');
+  if(!panel) return;
+  if(!holeDetailData){ panel.style.display = 'none'; panel.innerHTML = ''; return; }
+  const rows = htSubpitFilter ? holeDetailData.finished.filter(r=>r.subpit===htSubpitFilter) : holeDetailData.finished;
+  const last = maxHoleFinishDate(rows);
+  if(!last){ panel.style.display = 'none'; panel.innerHTML = ''; return; }
+  const days = [];
+  for(let i=6;i>=0;i--){ const d = new Date(last); d.setDate(d.getDate()-i); days.push(d); }
+  const byKey = {};
+  days.forEach(d=>{ byKey[dateKey(d)] = {date:d, holes:0, meter:0, fromTracking:0, rigs:new Set()}; });
+  rows.forEach(r=>{
+    const d = toDateOnly(r.finishDate);
+    const g = d && byKey[dateKey(d)];
+    if(!g) return;
+    g.holes++; g.meter += (r.depth||0);
+    if(r.fromTracking) g.fromTracking++;
+    if(r.rig) g.rigs.add(r.rig);
+  });
+  const list = days.map(d=>byKey[dateKey(d)]);
+  const tot = list.reduce((a,g)=>({holes:a.holes+g.holes, meter:a.meter+g.meter, fromTracking:a.fromTracking+g.fromTracking}), {holes:0, meter:0, fromTracking:0});
+  const anyTracking = holeDetailData.merge && holeDetailData.merge.trackingFile;
+  let html = `<h3 style="margin:0 0 6px;">📅 HOLE FINISH HARIAN <span>(7 hari terakhir s/d ${fmtDate(last)}${holeDetailContractor?' — '+holeDetailContractor:''}${htSubpitFilter?' — '+htSubpitFilter:''})</span></h3>`;
+  html += `<div class="field-note" style="margin-bottom:8px;">Dihitung dari tanggal finish tiap hole. Sumber: ${describeHoleDetailSource(holeDetailData) || 'file Hole Finish'}.</div>`;
+  html += '<div class="table-wrap"><table><tr><th>Tanggal</th><th>Hole Finish</th><th>Meter</th><th>Rig</th>' + (anyTracking?'<th>Dari Tracking</th>':'') + '</tr>';
+  list.forEach(g=>{
+    html += `<tr><td>${fmtDate(g.date)}</td><td><b>${g.holes}</b></td><td>${g.meter.toLocaleString('id-ID')}</td><td>${g.rigs.size?Array.from(g.rigs).sort().join(', '):'-'}</td>` + (anyTracking?`<td>${g.fromTracking||'-'}</td>`:'') + '</tr>';
+  });
+  html += `<tr style="font-weight:800;background:#241f52;"><td>TOTAL 7 HARI</td><td>${tot.holes}</td><td>${tot.meter.toLocaleString('id-ID')}</td><td></td>` + (anyTracking?`<td>${tot.fromTracking||'-'}</td>`:'') + '</tr>';
+  html += '</table></div>';
+  panel.innerHTML = html;
+  panel.style.display = 'block';
 }
 
 function selectHoleDetailContractor(c){
@@ -4406,7 +4560,7 @@ function renderHoleDrilldownPanel(){
     html += `<tr><td colspan="9">Tidak ada data.</td></tr>`;
   } else {
     rows.slice(0,500).forEach((r,i)=>{
-      html += `<tr><td>${i+1}</td><td><b>${r.holeId}</b></td><td>${r.subpit||'-'}</td><td>${r.x?.toFixed?r.x.toFixed(2):(r.x??'-')}</td><td>${r.y?.toFixed?r.y.toFixed(2):(r.y??'-')}</td>`;
+      html += `<tr><td>${i+1}</td><td><b>${r.holeId}</b>${r.fromTracking?' <span class="field-note">(tracking)</span>':''}</td><td>${r.subpit||'-'}</td><td>${r.x?.toFixed?r.x.toFixed(2):(r.x??'-')}</td><td>${r.y?.toFixed?r.y.toFixed(2):(r.y??'-')}</td>`;
       if(htDrilldownCategory==='finish'){ const fd = toDateOnly(r.finishDate); html += `<td>${r.depth??'-'}</td><td>${r.dpo||'-'}</td><td>${r.rig||'-'}</td><td>${fd?fmtDate(fd):'-'}</td>` + (showSampleCols?`<td>${r.totalSample??'-'}</td><td>${r.recovery??'-'}</td>`:''); }
       if(htDrilldownCategory==='cancel'){ const cd = toDateOnly(r.date); html += `<td>${cd?fmtDate(cd):'-'}</td><td>${r.remark||'-'}</td>`; }
       if(htDrilldownCategory==='plan' || htDrilldownCategory==='remaining') html += `<td>${r.minDepth??'-'}</td><td>${r.remark||'-'}</td>`;
@@ -4449,7 +4603,7 @@ function renderHoleTrackingDetail(){
   document.getElementById('ht-subtitle').textContent = htSubpitFilter
     ? `(sumber: file detail hole${ctr} — sub-pit: ${htSubpitFilter})`
     : `(sumber: file detail hole${ctr} — semua sub-pit)`;
-  document.getElementById('ht-note').innerHTML = `Data diambil dari daftar hole per-baris (sheet "${holeDetailData.sheets.finishedSheet||'-'}", "${holeDetailData.sheets.planSheet||'-'}", "${holeDetailData.sheets.cancelSheet||'-'}"). <b>Klik kartu Drill Plan / Hole Finish / Hole Cancel</b> untuk melihat daftar Hole ID beserta keterangannya. Total Meter dihitung dari kolom Depth hole finished.`;
+  document.getElementById('ht-note').innerHTML = `Data diambil dari daftar hole per-baris (sheet "${holeDetailData.sheets.finishedSheet||'-'}", "${holeDetailData.sheets.planSheet||'-'}", "${holeDetailData.sheets.cancelSheet||'-'}"). <b>Klik kartu Drill Plan / Hole Finish / Hole Cancel</b> untuk melihat daftar Hole ID beserta keterangannya. Total Meter dihitung dari kolom Depth hole finished.${holeDetailData.merge && holeDetailData.merge.trackingFile ? ` <b>Hole Finish = ${describeHoleDetailSource(holeDetailData)}</b> — hole tambahan dari Tracking ditandai <i>(tracking)</i> di detail Hole Finish.` : ''}`;
 
   const totals = computeHoleDetailTotals(holeDetailData, htSubpitFilter);
   document.getElementById('htSummaryRow').innerHTML = buildClickableSummaryCardsHtml(totals);
@@ -4468,6 +4622,7 @@ function renderHoleTrackingDetail(){
   document.getElementById('ht-table').innerHTML = html;
 
   renderHoleCancelFinishConflictPanel();
+  renderHoleDailyPanel();
   renderHoleDrilldownPanel();
   renderHoleFinishReconciliation();
   renderHoleMap();
@@ -5040,16 +5195,33 @@ document.getElementById('htFileInput').addEventListener('change', e=>{
       const detail = parseHoleDetailWorkbook(workbook);
       if(detail && (detail.finished.length || detail.plan.length || detail.cancel.length)){
         const contractor = detectHoleDetailContractor(detail, file.name);
-        if(!holeDetailData) holeDetailByContractor = {}; // sebelumnya format ringkasan lama / belum ada → mulai baru
-        holeDetailByContractor[contractor] = detail;     // file kontraktor yang sama → menggantikan yang lama
+        const entry = holeDetailStore[contractor] || (holeDetailStore[contractor] = {});
+        const finishOnly = isFinishOnlyDetail(detail);
+        const src = {detail, fileName:file.name, uploadedAt:Date.now()};
+        // File Tracking (hanya daftar Finish) → menambal file lengkap yang tersimpan, bukan menggantikannya.
+        // File lengkap → jadi data dasar baru; Tracking yang tersimpan tetap dipakai untuk hole yang lebih baru.
+        if(finishOnly) entry.tracking = src; else entry.base = src;
+        rebuildHoleDetailByContractor();
+        saveHoleDetailStore();
         htRows = null;
         // Tampilkan kontraktor yang cocok dengan file OEE; kalau tidak ada yang cocok, tampilkan file yang baru diupload.
         const show = (htAutoFilterByMainContractor && mainHoleDetailContractor()) || contractor;
         selectHoleDetailContractor(show);
-        const finishOnly = !detail.plan.length && !detail.sheets.cancelSheet;
-        let msg = finishOnly
-          ? `✅ "${file.name}" dimuat sebagai data ${contractor} — sheet "${detail.sheets.finishedSheet}", ${detail.finished.length} hole finish, total ${detail.finished.reduce((a,r)=>a+(r.depth||0),0).toLocaleString('id-ID')} m. File ini hanya berisi daftar Hole Finish (tanpa Plan/Cancel/koordinat), jadi Drill Plan, Sisa Hole, % Completion & peta hole tidak tersedia.`
-          : `✅ "${file.name}" dimuat sebagai data ${contractor} — ${detail.finished.length} hole finish, ${detail.plan.length} hole plan, ${detail.cancel.length} hole cancel.`;
+        const eff = holeDetailByContractor[contractor];
+        let msg;
+        if(finishOnly && entry.base){
+          const m = eff.merge;
+          msg = `✅ Tracking harian ${contractor} "${file.name}" dimuat — ${detail.finished.length} hole di file, `
+              + (m.added ? `${m.added} hole baru ditambahkan ke file lengkap (s/d ${fmtDate(m.baseDate)})` : `tidak ada hole baru dibanding file lengkap (s/d ${m.baseDate?fmtDate(m.baseDate):'-'})`)
+              + `. Total Hole Finish sekarang ${eff.finished.length}.`
+              + (m.addedNoPlan ? ` ⚠️ ${m.addedNoPlan} hole tidak ada di Hole_Plan, jadi sub-pit & koordinatnya kosong.` : '');
+        } else if(finishOnly){
+          msg = `✅ "${file.name}" dimuat sebagai data ${contractor} — sheet "${detail.sheets.finishedSheet}", ${detail.finished.length} hole finish, total ${detail.finished.reduce((a,r)=>a+(r.depth||0),0).toLocaleString('id-ID')} m. Belum ada file lengkap (Hole_Plan/Hole_Cancel) untuk ${contractor}, jadi Drill Plan, Sisa Hole, % Completion & peta hole belum tersedia — upload file lengkap hari Rabu/Jumat, nanti file Tracking ini otomatis digabungkan.`;
+        } else {
+          msg = `✅ "${file.name}" dimuat sebagai file lengkap ${contractor} — ${detail.finished.length} hole finish, ${detail.plan.length} hole plan, ${detail.cancel.length} hole cancel.`
+              + (eff.merge && eff.merge.added ? ` Ditambah ${eff.merge.added} hole dari Tracking harian yang lebih baru (total ${eff.finished.length}).` : '')
+              + ' Data disimpan — di hari lain cukup upload file Tracking.';
+        }
         if(show!==contractor) msg += ` Tampilan tetap ${show} mengikuti file OEE — pilih ${contractor} di Filter Kontraktor untuk melihatnya.`;
         statusEl.textContent = msg;
         statusEl.className = 'upload-bar status ok';
@@ -5066,7 +5238,9 @@ document.getElementById('htFileInput').addEventListener('change', e=>{
         return;
       }
       holeDetailData = null;
-      holeDetailByContractor = {};
+      holeDetailStore = {};
+      rebuildHoleDetailByContractor();
+      saveHoleDetailStore();
       holeDetailContractor = '';
       htRows = parsed.rows;
       htContractorFilter = '';
@@ -5685,6 +5859,7 @@ currentDATA = DEMO_DATA;
 renderTopbar(currentDATA);
 renderOverviewDispatch(currentDATA);
 restoreSampleCache();   // tampilkan hasil sinkron Google Sheet terakhir (kalau ada)
+restoreHoleDetailStore(); // muat lagi file Hole Finish tersimpan (file lengkap Rabu/Jumat + Tracking harian)
 
 </script>
 </body>
